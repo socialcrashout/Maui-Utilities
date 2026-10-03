@@ -114,6 +114,43 @@ function canManage(member) {
         SETTINGS.categories.some(category => isId(category.pingRoleId) && member?.roles?.cache?.has(category.pingRoleId));
 }
 
+async function applyStaffTypingPolicy(channel, state) {
+    const category = categoryFor(state.categoryKey);
+    const adminRoleId = SETTINGS.supportAdminRoleId;
+    const staffRoleIds = new Set([SETTINGS.supportTeamRoleId, adminRoleId, category?.pingRoleId].filter(isId));
+    // Everyone else stays read-only; explicit opener, claimer, and Support Admin grants override this.
+    await channel.permissionOverwrites.edit(channel.guild.roles.everyone.id, {
+        ViewChannel: false,
+        ReadMessageHistory: false,
+        SendMessages: false,
+    });
+    for (const roleId of staffRoleIds) {
+        await channel.permissionOverwrites.edit(roleId, {
+            ViewChannel: true,
+            ReadMessageHistory: true,
+            SendMessages: roleId === adminRoleId ? true : null,
+        });
+    }
+}
+
+async function syncOpenTicketPermissions(client) {
+    for (const guild of client.guilds.cache.values()) {
+        for (const channel of guild.channels.cache.values()) {
+            const state = stateFromChannel(channel);
+            if (!state || channel.type !== ChannelType.GuildText) continue;
+            await applyStaffTypingPolicy(channel, state);
+            await channel.permissionOverwrites.edit(state.ownerId, {
+                ViewChannel: true, ReadMessageHistory: true, SendMessages: true,
+            });
+            if (state.claimerId) {
+                await channel.permissionOverwrites.edit(state.claimerId, {
+                    ViewChannel: true, ReadMessageHistory: true, SendMessages: true,
+                });
+            }
+        }
+    }
+}
+
 function ticketButtons(state) {
     const claimed = Boolean(state.claimerId);
     return new ActionRowBuilder().addComponents(
@@ -136,7 +173,7 @@ function claimUpdatedContainer(message, state, claim, userId) {
     };
     updateClaimButton(api);
     return new ContainerBuilder(api).addTextDisplayComponents(new TextDisplayBuilder().setContent(
-        `-# ${claim ? `Claimed by <@${userId}> · opener is read-only` : `Unclaimed by <@${userId}> · opener can reply again`}`
+        `-# ${claim ? `Claimed by <@${userId}> · opener and claimer can chat; other support roles are view-only` : `Unclaimed by <@${userId}> · opener can chat; support roles remain view-only`}`
     ));
 }
 
@@ -174,9 +211,13 @@ async function openTicket(interaction, category, answers) {
     const state = { ownerId: interaction.user.id, categoryKey: category.key, claimerId: null, openedAt: Date.now() };
     const supportRoles = new Set([SETTINGS.supportTeamRoleId, SETTINGS.supportAdminRoleId, category.pingRoleId].filter(isId));
     const overwrites = [
-        { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+        { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.SendMessages] },
         { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.AttachFiles, PermissionFlagsBits.EmbedLinks] },
-        ...[...supportRoles].map(id => ({ id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] })),
+        ...[...supportRoles].map(id => ({
+            id,
+            allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory],
+            ...(id === SETTINGS.supportAdminRoleId ? { allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.SendMessages] } : {}),
+        })),
     ];
     if (guild.members.me) overwrites.push({ id: guild.members.me.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels, PermissionFlagsBits.AttachFiles] });
 
@@ -227,11 +268,16 @@ async function updateClaim(interaction, channel, state, claim) {
         return interaction.reply({ content: 'Only the person who claimed this ticket or a Support Admin can unclaim it.', flags: MessageFlags.Ephemeral });
     }
     await interaction.deferUpdate();
+    const previousClaimerId = state.claimerId;
     state.claimerId = claim ? interaction.user.id : null;
     await channel.setTopic(topicFor(state));
-    await channel.permissionOverwrites.edit(state.ownerId, {
-        ViewChannel: true, ReadMessageHistory: true, SendMessages: !claim || isSupportAdmin(await channel.guild.members.fetch(state.ownerId).catch(() => null)),
-    });
+    await applyStaffTypingPolicy(channel, state);
+    await channel.permissionOverwrites.edit(state.ownerId, { ViewChannel: true, ReadMessageHistory: true, SendMessages: true });
+    if (claim) {
+        await channel.permissionOverwrites.edit(interaction.user.id, { ViewChannel: true, ReadMessageHistory: true, SendMessages: true });
+    } else if (previousClaimerId && previousClaimerId !== state.ownerId) {
+        await channel.permissionOverwrites.delete(previousClaimerId).catch(() => null);
+    }
     const updated = claimUpdatedContainer(interaction.message, state, claim, interaction.user.id);
     await interaction.message.edit(ticketPayload(updated, [], { allowedMentions: { users: [interaction.user.id] } }));
 }
@@ -370,7 +416,9 @@ const prefixCommands = [
         const state = getPrefixTicket(message); if (!state || !await staffOnly(message)) return;
         if (state.claimerId && state.claimerId !== message.author.id && !isSupportAdmin(message.member)) return message.reply(`Already claimed by <@${state.claimerId}>.`);
         state.claimerId = message.author.id; await message.channel.setTopic(topicFor(state));
-        await message.channel.permissionOverwrites.edit(state.ownerId, { ViewChannel: true, ReadMessageHistory: true, SendMessages: !isSupportAdmin(await message.guild.members.fetch(state.ownerId).catch(() => null)) });
+        await applyStaffTypingPolicy(message.channel, state);
+        await message.channel.permissionOverwrites.edit(state.ownerId, { ViewChannel: true, ReadMessageHistory: true, SendMessages: true });
+        await message.channel.permissionOverwrites.edit(message.author.id, { ViewChannel: true, ReadMessageHistory: true, SendMessages: true });
         const recent = await message.channel.messages.fetch({ limit: 100 });
         const controls = recent.find(m => m.author.id === client.user.id && m.components.length && m.components[0].toJSON().components?.some(c => c.type === 1));
         if (controls) await controls.edit(ticketPayload(claimUpdatedContainer(controls, state, true, message.author.id), [], { allowedMentions: { users: [message.author.id] } }));
@@ -379,8 +427,11 @@ const prefixCommands = [
     { name: 'unclaim', execute: async (message, _args, client) => {
         const state = getPrefixTicket(message); if (!state || !await staffOnly(message)) return;
         if (state.claimerId && state.claimerId !== message.author.id && !isSupportAdmin(message.member)) return message.reply('Only the current claimer or a Support Admin can unclaim this ticket.');
+        const previousClaimerId = state.claimerId;
         state.claimerId = null; await message.channel.setTopic(topicFor(state));
+        await applyStaffTypingPolicy(message.channel, state);
         await message.channel.permissionOverwrites.edit(state.ownerId, { ViewChannel: true, ReadMessageHistory: true, SendMessages: true });
+        if (previousClaimerId && previousClaimerId !== state.ownerId) await message.channel.permissionOverwrites.delete(previousClaimerId).catch(() => null);
         const recent = await message.channel.messages.fetch({ limit: 100 });
         const controls = recent.find(m => m.author.id === client.user.id && m.components.length && m.components[0].toJSON().components?.some(c => c.type === 1));
         if (controls) await controls.edit(ticketPayload(claimUpdatedContainer(controls, state, false, message.author.id), [], { allowedMentions: { users: [message.author.id] } }));
@@ -405,6 +456,7 @@ const prefixCommands = [
 module.exports = {
     prefixCommands,
     handleInteraction,
+    syncOpenTicketPermissions,
     settings: SETTINGS,
     eventName: Events.InteractionCreate,
 };

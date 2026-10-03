@@ -156,6 +156,9 @@ async function start() {
 
 client.once(Events.ClientReady, c => {
     console.log(`Logged in as ${c.user.tag} (PID ${process.pid})`);
+    ticketSystem.syncOpenTicketPermissions(c).catch(err => {
+        console.error('Failed to sync open ticket permissions:', err);
+    });
 });
 
 // ---------- Prefix commands ----------
