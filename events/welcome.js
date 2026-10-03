@@ -49,7 +49,7 @@ module.exports = {
             .addMediaGalleryComponents(
                 new MediaGalleryBuilder().addItems(
                     new MediaGalleryItemBuilder().setURL(
-                        'https://yumi.onl/api/files/6a8220f7e05519a35d292650/raw'
+                        'https://yumi.onl/api/files/6ac164c95ec612542f6d95fd/raw'
                     )
                 )
             );

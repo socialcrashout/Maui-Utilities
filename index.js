@@ -5,6 +5,7 @@ const { Client, GatewayIntentBits, Collection, REST, Routes, Events } = require(
 const fs = require('fs');
 const path = require('path');
 const { connectDB } = require('./db');
+const ticketSystem = require('./ticketSystem');
 
 const { DISCORD_TOKEN, CLIENT_ID, GUILD_ID, PREFIX } = process.env;
 
@@ -65,6 +66,7 @@ function loadPrefixCommands() {
             client.commands.set(command.name, command);
         }
     }
+    for (const command of ticketSystem.prefixCommands) client.commands.set(command.name, command);
     console.log(`loaded ${client.commands.size} prefix commands successfully.`);
 }
 
@@ -182,6 +184,14 @@ client.on(Events.MessageCreate, async message => {
 
 // ---------- Slash commands ----------
 client.on(Events.InteractionCreate, async interaction => {
+    const ticketHandled = await ticketSystem.handleInteraction(interaction).catch(err => {
+        console.error('Error handling ticket interaction:', err);
+        if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
+            return interaction.reply({ content: 'There was a problem handling that ticket action.', flags: 64 }).then(() => true).catch(() => true);
+        }
+        return true;
+    });
+    if (ticketHandled) return;
     if (!interaction.isChatInputCommand()) return;
 
     const { commandName } = interaction;

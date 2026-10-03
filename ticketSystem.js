@@ -1,0 +1,390 @@
+// Ticket system settings and copy live here so they are easy to customize.
+// Add Discord role/channel IDs below before using the system.
+const {
+    ActionRowBuilder,
+    ButtonBuilder,
+    ButtonStyle,
+    ChannelType,
+    ContainerBuilder,
+    MessageFlags,
+    ModalBuilder,
+    PermissionFlagsBits,
+    SeparatorBuilder,
+    SeparatorSpacingSize,
+    StringSelectMenuBuilder,
+    TextDisplayBuilder,
+    TextInputBuilder,
+    TextInputStyle,
+    Events,
+    AttachmentBuilder,
+    FileBuilder,
+    MediaGalleryBuilder,
+    MediaGalleryItemBuilder,
+} = require('discord.js');
+
+const SETTINGS = {
+    prefix: process.env.PREFIX || '-',
+    // The parent channel category where every ticket channel is created.
+    supportCategoryId: '',
+    // Optional channel where closed ticket transcripts are posted.
+    transcriptChannelId: '',
+    supportTeamRoleId: '',
+    supportAdminRoleId: '',
+    panelTitle: 'Maui Support',
+    panelDescription: 'Choose the team that best fits your request. A short form will open so we can get the right details.',
+    panelButtonPlaceholder: 'Choose a support category',
+    ticketTitle: 'Support ticket',
+    ticketWelcome: 'Thanks for contacting the team. Please share any extra details here and a team member will help shortly.',
+    bannerUrl: '', // Optional hosted image URL. Leave blank to omit the banner.
+    transcriptTitle: 'Ticket transcript',
+    openingQuestions: [
+        { id: 'reason', label: 'Why are you opening a ticket?', placeholder: 'Describe what you need help with', required: true, style: TextInputStyle.Paragraph },
+        { id: 'details', label: 'Extra details (optional)', placeholder: 'Anything else we should know?', required: false, style: TextInputStyle.Paragraph },
+    ],
+    closeQuestion: { id: 'close_reason', label: 'Closing reason', placeholder: 'Briefly explain why this ticket is closing', required: true },
+    categories: [
+        { key: 'general', label: 'General Support', description: 'Questions, help, or general assistance.', emoji: '💬', pingRoleId: '' },
+        { key: 'hr', label: 'Human Resources Support', description: 'People, staffing, or HR related matters.', emoji: '👥', pingRoleId: '' },
+        { key: 'prd', label: 'Public Relations Support', description: 'Product and PRD related questions.', emoji: '📋', pingRoleId: '' },
+        { key: 'leadership', label: 'Leadership Support', description: 'Private matters for the leadership team.', emoji: '🛡️', pingRoleId: '' },
+        { key: 'dev', label: 'Development Support', description: 'Technical issues and development help.', emoji: '🛠️', pingRoleId: '' },
+    ],
+    // Change labels and emoji freely. Button ids are internal and should stay as-is.
+    buttons: { claim: 'Claim', unclaim: 'Unclaim', rename: 'Rename', escalate: 'Escalate', close: 'Close' },
+};
+
+const TICKET_PREFIX = 'maui-ticket';
+const isId = value => /^\d{17,20}$/.test(String(value || ''));
+const safeText = (value, max = 1000) => String(value || '').replace(/[<>]/g, '').slice(0, max) || 'Not provided';
+const slug = value => String(value || '').toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 80) || 'ticket';
+
+function ticketContainer(title, lines, includeBanner = false) {
+    const box = new ContainerBuilder();
+    if (includeBanner && SETTINGS.bannerUrl) {
+        box.addMediaGalleryComponents(new MediaGalleryBuilder().addItems(
+            new MediaGalleryItemBuilder().setURL(SETTINGS.bannerUrl)
+        ));
+        box.addSeparatorComponents(new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small));
+    }
+    box.addTextDisplayComponents(new TextDisplayBuilder().setContent(`## ${title}\n${lines.join('\n')}`));
+    return box;
+}
+
+function ticketPayload(container, components = [], extra = {}) {
+    for (const component of components) container.addActionRowComponents(component);
+    return { flags: MessageFlags.IsComponentsV2, components: [container], ...extra };
+}
+
+function stateFromChannel(channel) {
+    const match = String(channel.topic || '').match(/^maui-ticket\|([^|]+)\|([^|]+)\|([^|]*)\|([^|]+)$/);
+    if (!match) return null;
+    return { ownerId: match[1], categoryKey: match[2], claimerId: match[3] || null, openedAt: Number(match[4]) || Date.now() };
+}
+
+function topicFor(state) {
+    return `${TICKET_PREFIX}|${state.ownerId}|${state.categoryKey}|${state.claimerId || ''}|${state.openedAt}`.slice(0, 1024);
+}
+
+function categoryFor(key) { return SETTINGS.categories.find(category => category.key === key); }
+
+function isSupportAdmin(member) {
+    return member?.permissions?.has(PermissionFlagsBits.Administrator) ||
+        (isId(SETTINGS.supportAdminRoleId) && member?.roles?.cache?.has(SETTINGS.supportAdminRoleId));
+}
+
+function canManage(member) {
+    return isSupportAdmin(member) ||
+        (isId(SETTINGS.supportTeamRoleId) && member?.roles?.cache?.has(SETTINGS.supportTeamRoleId)) ||
+        SETTINGS.categories.some(category => isId(category.pingRoleId) && member?.roles?.cache?.has(category.pingRoleId));
+}
+
+function ticketButtons(state) {
+    const claimed = Boolean(state.claimerId);
+    return new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`maui:ticket:${claimed ? 'unclaim' : 'claim'}`).setLabel(claimed ? SETTINGS.buttons.unclaim : SETTINGS.buttons.claim).setStyle(claimed ? ButtonStyle.Secondary : ButtonStyle.Success),
+        new ButtonBuilder().setCustomId('maui:ticket:rename').setLabel(SETTINGS.buttons.rename).setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('maui:ticket:escalate').setLabel(SETTINGS.buttons.escalate).setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('maui:ticket:close').setLabel(SETTINGS.buttons.close).setStyle(ButtonStyle.Danger),
+    );
+}
+
+function claimUpdatedContainer(message, state, claim, userId) {
+    const api = message.components[0].toJSON();
+    const updateClaimButton = component => {
+        if (component.type === 2 && ['maui:ticket:claim', 'maui:ticket:unclaim'].includes(component.custom_id)) {
+            component.custom_id = `maui:ticket:${claim ? 'unclaim' : 'claim'}`;
+            component.label = claim ? SETTINGS.buttons.unclaim : SETTINGS.buttons.claim;
+            component.style = claim ? ButtonStyle.Secondary : ButtonStyle.Success;
+        }
+        for (const child of component.components || []) updateClaimButton(child);
+    };
+    updateClaimButton(api);
+    return new ContainerBuilder(api).addTextDisplayComponents(new TextDisplayBuilder().setContent(
+        `-# ${claim ? `Claimed by <@${userId}> · opener is read-only` : `Unclaimed by <@${userId}> · opener can reply again`}`
+    ));
+}
+
+async function createPanel(message) {
+    if (!isId(SETTINGS.supportCategoryId)) return message.reply('Set `supportCategoryId` near the top of `ticketSystem.js` first.');
+    const select = new StringSelectMenuBuilder()
+        .setCustomId('maui:ticket:category')
+        .setPlaceholder(SETTINGS.panelButtonPlaceholder)
+        .addOptions(SETTINGS.categories.map(category => ({
+            label: category.label.slice(0, 100), description: category.description.slice(0, 100), value: category.key,
+            ...(category.emoji ? { emoji: category.emoji } : {}),
+        })));
+    const container = ticketContainer(SETTINGS.panelTitle, [SETTINGS.panelDescription], true);
+    await message.channel.send(ticketPayload(container, [new ActionRowBuilder().addComponents(select)], {
+        allowedMentions: { parse: [] },
+    }));
+    await message.reply('Support panel posted.');
+}
+
+async function openTicket(interaction, category, answers) {
+    const guild = interaction.guild;
+    if (!guild) return interaction.reply({ content: 'Tickets can only be opened in a server.', flags: MessageFlags.Ephemeral });
+    if (!isId(SETTINGS.supportCategoryId)) return interaction.reply({ content: 'The support channel category ID is not configured in `ticketSystem.js`.', flags: MessageFlags.Ephemeral });
+    const parent = await guild.channels.fetch(SETTINGS.supportCategoryId).catch(() => null);
+    if (!parent || parent.type !== ChannelType.GuildCategory) return interaction.reply({ content: 'The configured support category was not found. Check its ID in `ticketSystem.js`.', flags: MessageFlags.Ephemeral });
+
+    const existing = guild.channels.cache.find(channel => channel.type === ChannelType.GuildText && stateFromChannel(channel)?.ownerId === interaction.user.id);
+    if (existing) return interaction.reply({ content: `You already have an open ticket: ${existing}`, flags: MessageFlags.Ephemeral });
+
+    const existingNumbers = guild.channels.cache
+        .map(channel => channel.name.match(/^ticket-(\d+)-/))
+        .filter(Boolean).map(match => Number(match[1]));
+    const number = Math.max(0, ...existingNumbers) + 1;
+    const state = { ownerId: interaction.user.id, categoryKey: category.key, claimerId: null, openedAt: Date.now() };
+    const supportRoles = new Set([SETTINGS.supportTeamRoleId, SETTINGS.supportAdminRoleId, category.pingRoleId].filter(isId));
+    const overwrites = [
+        { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+        { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.AttachFiles, PermissionFlagsBits.EmbedLinks] },
+        ...[...supportRoles].map(id => ({ id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] })),
+    ];
+    if (guild.members.me) overwrites.push({ id: guild.members.me.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels, PermissionFlagsBits.AttachFiles] });
+
+    const channel = await guild.channels.create({
+        name: `ticket-${String(number).padStart(3, '0')}-${category.key}-${slug(interaction.user.username).slice(0, 35)}`.slice(0, 100),
+        type: ChannelType.GuildText,
+        parent: parent.id,
+        topic: topicFor(state),
+        permissionOverwrites: overwrites,
+        reason: `Ticket opened by ${interaction.user.tag} (${category.label})`,
+    });
+    const rolePing = isId(category.pingRoleId) ? `<@&${category.pingRoleId}>` : '';
+    const content = [rolePing, `<@${interaction.user.id}>`].filter(Boolean).join(' ');
+    const lines = [
+        `### ${category.emoji} ${SETTINGS.ticketTitle} · ${category.label}`,
+        content,
+        SETTINGS.ticketWelcome,
+        '',
+        `**Opened by:** <@${interaction.user.id}>`,
+        `**Category:** ${category.label}`,
+        `**Why:** ${safeText(answers.reason)}`,
+        `**Additional details:** ${safeText(answers.details)}`,
+        `**Opened:** <t:${Math.floor(state.openedAt / 1000)}:F>`,
+        `**Claimed by:** Unclaimed`,
+    ];
+    await channel.send(ticketPayload(ticketContainer(`${category.emoji} ${SETTINGS.ticketTitle}`, lines), [ticketButtons(state)], {
+        allowedMentions: { users: [interaction.user.id], roles: isId(category.pingRoleId) ? [category.pingRoleId] : [] },
+    }));
+    await interaction.reply({ content: `Your ticket is ready: ${channel}`, flags: MessageFlags.Ephemeral });
+}
+
+function openTicketModal(category) {
+    const modal = new ModalBuilder().setCustomId(`maui:ticket:open:${category.key}`).setTitle(`Open ${category.label}`.slice(0, 45));
+    for (const question of SETTINGS.openingQuestions.slice(0, 5)) {
+        const input = new TextInputBuilder().setCustomId(question.id).setLabel(question.label.slice(0, 45))
+            .setPlaceholder((question.placeholder || '').slice(0, 100)).setStyle(question.style || TextInputStyle.Short)
+            .setRequired(Boolean(question.required));
+        modal.addComponents(new ActionRowBuilder().addComponents(input));
+    }
+    return modal;
+}
+
+async function updateClaim(interaction, channel, state, claim) {
+    if (!canManage(interaction.member)) return interaction.reply({ content: 'Only the support team can claim or unclaim tickets.', flags: MessageFlags.Ephemeral });
+    if (claim && state.claimerId && state.claimerId !== interaction.user.id && !isSupportAdmin(interaction.member)) {
+        return interaction.reply({ content: `This ticket is already claimed by <@${state.claimerId}>.`, flags: MessageFlags.Ephemeral });
+    }
+    if (!claim && state.claimerId && state.claimerId !== interaction.user.id && !isSupportAdmin(interaction.member)) {
+        return interaction.reply({ content: 'Only the person who claimed this ticket or a Support Admin can unclaim it.', flags: MessageFlags.Ephemeral });
+    }
+    state.claimerId = claim ? interaction.user.id : null;
+    await channel.setTopic(topicFor(state));
+    await channel.permissionOverwrites.edit(state.ownerId, {
+        ViewChannel: true, ReadMessageHistory: true, SendMessages: !claim || isSupportAdmin(await channel.guild.members.fetch(state.ownerId).catch(() => null)),
+    });
+    const updated = claimUpdatedContainer(interaction.message, state, claim, interaction.user.id);
+    await interaction.update(ticketPayload(updated, [], { allowedMentions: { users: [interaction.user.id] } }));
+}
+
+async function transcriptHtml(channel, state, category, reason) {
+    const messages = [];
+    let before;
+    while (true) {
+        const page = await channel.messages.fetch({ limit: 100, ...(before ? { before } : {}) });
+        messages.push(...page.values());
+        if (page.size < 100) break;
+        before = page.last().id;
+    }
+    messages.sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+    const esc = text => String(text || '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+    const body = messages.map(message => {
+        const componentText = [];
+        const readComponents = component => {
+            if (component.content) componentText.push(component.content);
+            for (const child of component.components || []) readComponents(child);
+        };
+        for (const component of message.components || []) readComponents(component.toJSON());
+        const text = [message.content, ...componentText].filter(Boolean).join('\n') || '[No text]';
+        return `<article><b>${esc(message.author.tag)}</b> <time>${new Date(message.createdTimestamp).toISOString()}</time><p>${esc(text)}</p>${message.attachments.map(file => `<p><a href="${esc(file.url)}">${esc(file.name || 'attachment')}</a></p>`).join('')}</article>`;
+    }).join('\n');
+    const opener = await channel.guild.members.fetch(state.ownerId).catch(() => null);
+    const claimer = state.claimerId ? await channel.guild.members.fetch(state.claimerId).catch(() => null) : null;
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>${esc(SETTINGS.transcriptTitle)}</title><style>body{font:15px system-ui;background:#111;color:#eee;max-width:900px;margin:40px auto;padding:0 20px}article{padding:14px 0;border-bottom:1px solid #333}time{color:#999;font-size:12px}p{white-space:pre-wrap}</style></head><body><h1>${esc(SETTINGS.transcriptTitle)} · ${esc(channel.name)}</h1><p>Opened by: ${esc(opener?.user.tag || state.ownerId)}<br>Category: ${esc(category?.label || state.categoryKey)}<br>Claimed by: ${esc(claimer?.user.tag || 'Unclaimed')}<br>Opened: ${new Date(state.openedAt).toISOString()}<br>Closed: ${new Date().toISOString()}<br>Closing reason: ${esc(reason)}</p><hr>${body}</body></html>`;
+    return new AttachmentBuilder(Buffer.from(html, 'utf8'), { name: `${channel.name}-transcript.html`, description: 'Ticket conversation transcript' });
+}
+
+async function closeTicket(interaction, channel, state, reason) {
+    if (!canManage(interaction.member) && state.ownerId !== interaction.user.id) return interaction.reply({ content: 'Only the ticket opener or support staff can close this ticket.', flags: MessageFlags.Ephemeral });
+    const category = categoryFor(state.categoryKey);
+    const file = await transcriptHtml(channel, state, category, reason);
+    const logChannel = isId(SETTINGS.transcriptChannelId)
+        ? await interaction.guild.channels.fetch(SETTINGS.transcriptChannelId).catch(() => null)
+        : null;
+    const transcriptTarget = logChannel?.isTextBased() ? logChannel : channel;
+    {
+        const summary = ticketContainer(SETTINGS.transcriptTitle, [
+                `**Ticket:** ${channel.name}`, `**Opened by:** <@${state.ownerId}>`,
+                `**Category:** ${category?.label || state.categoryKey}`, `**Claimed by:** ${state.claimerId ? `<@${state.claimerId}>` : 'Unclaimed'}`,
+                `**Opened:** <t:${Math.floor(state.openedAt / 1000)}:F>`, `**Closed by:** <@${interaction.user.id}>`, `**Closing reason:** ${safeText(reason)}`,
+                `Transcript attached: **${channel.name}-transcript.html**`,
+            ]);
+        summary.addFileComponents(new FileBuilder().setURL(`attachment://${file.name}`));
+        await transcriptTarget.send(ticketPayload(summary, [], { files: [file], allowedMentions: { users: [state.ownerId, state.claimerId, interaction.user.id].filter(Boolean) } }));
+    }
+    if (transcriptTarget === channel) {
+        await interaction.reply({ content: 'Transcript saved in this ticket. It will be archived in place because no transcript log channel is configured.', flags: MessageFlags.Ephemeral });
+        await channel.setName(`closed-${channel.name}`.slice(0, 100)).catch(() => null);
+        await channel.permissionOverwrites.edit(state.ownerId, { ViewChannel: false, SendMessages: false }).catch(() => null);
+        await channel.setTopic(`maui-closed|${state.ownerId}|${state.categoryKey}|${state.claimerId || ''}|${state.openedAt}`.slice(0, 1024)).catch(() => null);
+        return;
+    }
+    await interaction.reply({ content: 'Transcript saved. This ticket will close in 5 seconds.', flags: MessageFlags.Ephemeral });
+    setTimeout(() => channel.delete(`Ticket closed by ${interaction.user.tag}: ${reason}`).catch(() => null), 5000);
+}
+
+async function showActionModal(interaction, action) {
+    const modal = new ModalBuilder().setCustomId(`maui:ticket:${action}:submit`).setTitle(action === 'rename' ? 'Rename ticket' : action === 'escalate' ? 'Escalate ticket' : 'Close ticket');
+    const config = action === 'rename'
+        ? { id: 'ticket_name', label: 'New ticket name', placeholder: 'e.g. payment-question', required: true }
+        : action === 'escalate'
+            ? { id: 'escalation_message', label: 'Why should leadership review this?', placeholder: 'Add a short message for leadership', required: true }
+            : SETTINGS.closeQuestion;
+    const input = new TextInputBuilder().setCustomId(config.id).setLabel(config.label.slice(0, 45)).setPlaceholder((config.placeholder || '').slice(0, 100)).setRequired(config.required).setStyle(action === 'escalate' || action === 'close' ? TextInputStyle.Paragraph : TextInputStyle.Short);
+    modal.addComponents(new ActionRowBuilder().addComponents(input));
+    await interaction.showModal(modal);
+}
+
+async function handleInteraction(interaction) {
+    if (interaction.isStringSelectMenu() && interaction.customId === 'maui:ticket:category') {
+        const category = categoryFor(interaction.values[0]);
+        if (!category) return interaction.reply({ content: 'That ticket category is unavailable.', flags: MessageFlags.Ephemeral });
+        return interaction.showModal(openTicketModal(category));
+    }
+    if (interaction.isModalSubmit() && interaction.customId.startsWith('maui:ticket:open:')) {
+        const category = categoryFor(interaction.customId.split(':').pop());
+        if (!category) return interaction.reply({ content: 'That ticket category is unavailable.', flags: MessageFlags.Ephemeral });
+        const answers = Object.fromEntries(SETTINGS.openingQuestions.slice(0, 5).map(q => [q.id, interaction.fields.getTextInputValue(q.id)]));
+        return openTicket(interaction, category, answers);
+    }
+    if (interaction.isButton() && interaction.customId.startsWith('maui:ticket:')) {
+        const channel = interaction.channel;
+        const state = channel && stateFromChannel(channel);
+        if (!state) return interaction.reply({ content: 'Ticket controls only work inside an open ticket.', flags: MessageFlags.Ephemeral });
+        const action = interaction.customId.split(':').pop();
+        if (action === 'claim' || action === 'unclaim') return updateClaim(interaction, channel, state, action === 'claim');
+        if (!canManage(interaction.member) && action !== 'close') return interaction.reply({ content: 'Only support staff can use this ticket action.', flags: MessageFlags.Ephemeral });
+        return showActionModal(interaction, action);
+    }
+    if (interaction.isModalSubmit() && interaction.customId.startsWith('maui:ticket:')) {
+        const action = interaction.customId.split(':')[2];
+        const channel = interaction.channel;
+        const state = channel && stateFromChannel(channel);
+        if (!state) return interaction.reply({ content: 'This ticket is no longer open.', flags: MessageFlags.Ephemeral });
+        if (action === 'rename') {
+            if (!canManage(interaction.member)) return interaction.reply({ content: 'Only support staff can rename a ticket.', flags: MessageFlags.Ephemeral });
+            const base = slug(interaction.fields.getTextInputValue('ticket_name'));
+            await channel.setName(`ticket-${base}`.slice(0, 100));
+            return interaction.reply({ content: `Ticket renamed to **${channel.name}**.`, flags: MessageFlags.Ephemeral });
+        }
+        if (action === 'escalate') {
+            if (!canManage(interaction.member)) return interaction.reply({ content: 'Only support staff can escalate a ticket.', flags: MessageFlags.Ephemeral });
+            const leadership = categoryFor('leadership');
+            const roleId = leadership?.pingRoleId;
+            const message = interaction.fields.getTextInputValue('escalation_message');
+            await channel.send(ticketPayload(ticketContainer('⬆️ Leadership escalation', [isId(roleId) ? `<@&${roleId}>` : '', `**Escalated by:** <@${interaction.user.id}>`, `**Message:** ${safeText(message)}`]), [], {
+                allowedMentions: { roles: isId(roleId) ? [roleId] : [], users: [interaction.user.id] },
+            }));
+            return interaction.reply({ content: isId(roleId) ? 'Escalated and notified Leadership Support.' : 'Escalation posted. Add the Leadership ping role ID in `ticketSystem.js` to notify the role.', flags: MessageFlags.Ephemeral });
+        }
+        if (action === 'close') return closeTicket(interaction, channel, state, interaction.fields.getTextInputValue(SETTINGS.closeQuestion.id));
+    }
+    return false;
+}
+
+const staffOnly = async message => {
+    if (!canManage(message.member)) { await message.reply('Only the support team can use ticket staff commands.'); return false; }
+    return true;
+};
+function getPrefixTicket(message) {
+    const state = stateFromChannel(message.channel);
+    if (!state) { message.reply('Use this command inside a ticket channel.'); return null; }
+    return state;
+}
+
+const prefixCommands = [
+    { name: 'ticketpanel', execute: async message => { if (await staffOnly(message)) await createPanel(message); } },
+    { name: 'claim', execute: async (message, _args, client) => {
+        const state = getPrefixTicket(message); if (!state || !await staffOnly(message)) return;
+        if (state.claimerId && state.claimerId !== message.author.id && !isSupportAdmin(message.member)) return message.reply(`Already claimed by <@${state.claimerId}>.`);
+        state.claimerId = message.author.id; await message.channel.setTopic(topicFor(state));
+        await message.channel.permissionOverwrites.edit(state.ownerId, { ViewChannel: true, ReadMessageHistory: true, SendMessages: !isSupportAdmin(await message.guild.members.fetch(state.ownerId).catch(() => null)) });
+        const recent = await message.channel.messages.fetch({ limit: 100 });
+        const controls = recent.find(m => m.author.id === client.user.id && m.components.length && m.components[0].toJSON().components?.some(c => c.type === 1));
+        if (controls) await controls.edit(ticketPayload(claimUpdatedContainer(controls, state, true, message.author.id), [], { allowedMentions: { users: [message.author.id] } }));
+        await message.reply(`Ticket claimed by <@${message.author.id}>.`);
+    } },
+    { name: 'unclaim', execute: async (message, _args, client) => {
+        const state = getPrefixTicket(message); if (!state || !await staffOnly(message)) return;
+        if (state.claimerId && state.claimerId !== message.author.id && !isSupportAdmin(message.member)) return message.reply('Only the current claimer or a Support Admin can unclaim this ticket.');
+        state.claimerId = null; await message.channel.setTopic(topicFor(state));
+        await message.channel.permissionOverwrites.edit(state.ownerId, { ViewChannel: true, ReadMessageHistory: true, SendMessages: true });
+        const recent = await message.channel.messages.fetch({ limit: 100 });
+        const controls = recent.find(m => m.author.id === client.user.id && m.components.length && m.components[0].toJSON().components?.some(c => c.type === 1));
+        if (controls) await controls.edit(ticketPayload(claimUpdatedContainer(controls, state, false, message.author.id), [], { allowedMentions: { users: [message.author.id] } }));
+        await message.reply('Ticket unclaimed. The opener can reply again.');
+    } },
+    { name: 'rename', execute: async (message, args) => {
+        const state = getPrefixTicket(message); if (!state || !await staffOnly(message)) return;
+        if (!args.length) return message.reply(`Usage: ${SETTINGS.prefix}rename new-ticket-name`);
+        await message.channel.setName(`ticket-${slug(args.join('-'))}`.slice(0, 100)); await message.reply(`Renamed to **${message.channel.name}**.`);
+    } },
+    { name: 'escalate', execute: async (message, args) => {
+        const state = getPrefixTicket(message); if (!state || !await staffOnly(message)) return;
+        if (!args.length) return message.reply(`Usage: ${SETTINGS.prefix}escalate message for leadership`);
+        const leadership = categoryFor('leadership'); const roleId = leadership?.pingRoleId;
+        await message.channel.send(ticketPayload(ticketContainer('⬆️ Leadership escalation', [`**Escalated by:** <@${message.author.id}>`, `**Message:** ${safeText(args.join(' '))}`]), [], {
+            content: isId(roleId) ? `<@&${roleId}>` : '', allowedMentions: { users: [message.author.id], roles: isId(roleId) ? [roleId] : [] },
+        }));
+        if (!isId(roleId)) await message.reply('Escalation posted. Add the Leadership ping role ID in `ticketSystem.js` to notify the role.');
+    } },
+];
+
+module.exports = {
+    prefixCommands,
+    handleInteraction,
+    settings: SETTINGS,
+    eventName: Events.InteractionCreate,
+};
