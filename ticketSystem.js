@@ -177,6 +177,26 @@ function claimUpdatedContainer(message, state, claim, userId) {
     ));
 }
 
+function escalationContainer(state) {
+    const roleId = SETTINGS.supportAdminRoleId;
+    const pings = [isId(roleId) ? `<@&${roleId}>` : '', `<@${state.ownerId}>`].filter(Boolean).join(' - ');
+    return ticketContainer('<:maui:1556034121271214141> **Ticket Escalated**', [
+        `-# ${pings}`,
+        'This ticket has been **escalated to the Leadership Team** for further assistance. Please remain patient while a member of Leadership reviews your request.',
+        '',
+        'Someone will be with you **shortly** to assist you further. In the meantime, please avoid sending unnecessary messages, as this may delay the review of your ticket.',
+        '',
+        'Thank you for your patience and understanding!',
+    ]);
+}
+
+function escalationMentions(state) {
+    return {
+        roles: isId(SETTINGS.supportAdminRoleId) ? [SETTINGS.supportAdminRoleId] : [],
+        users: [...new Set([state.ownerId].filter(isId))],
+    };
+}
+
 async function createPanel(message) {
     if (!isId(SETTINGS.supportCategoryId)) return message.reply('Set `supportCategoryId` near the top of `ticketSystem.js` first.');
     const select = new StringSelectMenuBuilder()
@@ -229,8 +249,8 @@ async function openTicket(interaction, category, answers) {
         permissionOverwrites: overwrites,
         reason: `Ticket opened by ${interaction.user.tag} (${category.label})`,
     });
-    const rolePing = isId(category.pingRoleId) ? `<@&${category.pingRoleId}>` : '';
-    const content = [rolePing, `<@${interaction.user.id}>`].filter(Boolean).join(' ');
+    const pingRoleIds = [...new Set([SETTINGS.supportTeamRoleId, category.pingRoleId].filter(isId))];
+    const content = [...pingRoleIds.map(roleId => `<@&${roleId}>`), `<@${interaction.user.id}>`].join(' ');
     const lines = [
         content,
         SETTINGS.ticketWelcome,
@@ -243,7 +263,7 @@ async function openTicket(interaction, category, answers) {
         `**Claimed by:** Unclaimed`,
     ];
     await channel.send(ticketPayload(ticketContainer(`${category.emoji} ${SETTINGS.ticketTitle} · ${category.label}`, lines, true), [ticketButtons(state)], {
-        allowedMentions: { users: [interaction.user.id], roles: isId(category.pingRoleId) ? [category.pingRoleId] : [] },
+        allowedMentions: { users: [interaction.user.id], roles: pingRoleIds },
     }));
     await interaction.editReply({ content: `Your ticket is ready: ${channel}` });
 }
@@ -326,7 +346,10 @@ async function closeTicket(interaction, channel, state, reason) {
                 `Transcript attached: **${channel.name}-transcript.html**`,
             ]);
         summary.addFileComponents(new FileBuilder().setURL(`attachment://${file.name}`));
-        await transcriptTarget.send(ticketPayload(summary, [], { files: [file], allowedMentions: { users: [state.ownerId, state.claimerId, interaction.user.id].filter(Boolean) } }));
+        await transcriptTarget.send(ticketPayload(summary, [], {
+            files: [file],
+            allowedMentions: { users: [...new Set([state.ownerId, state.claimerId, interaction.user.id].filter(isId))] },
+        }));
     }
     if (transcriptTarget === channel) {
         await interaction.editReply({ content: 'Transcript saved in this ticket. It will be archived in place because no transcript log channel is configured.' });
@@ -343,10 +366,8 @@ async function showActionModal(interaction, action) {
     const modal = new ModalBuilder().setCustomId(`maui:ticket:${action}:submit`).setTitle(action === 'rename' ? 'Rename ticket' : action === 'escalate' ? 'Escalate ticket' : 'Close ticket');
     const config = action === 'rename'
         ? { id: 'ticket_name', label: 'New ticket name', placeholder: 'e.g. payment-question', required: true }
-        : action === 'escalate'
-            ? { id: 'escalation_message', label: 'Why should leadership review this?', placeholder: 'Add a short message for leadership', required: true }
-            : SETTINGS.closeQuestion;
-    const input = new TextInputBuilder().setCustomId(config.id).setLabel(config.label.slice(0, 45)).setPlaceholder((config.placeholder || '').slice(0, 100)).setRequired(config.required).setStyle(action === 'escalate' || action === 'close' ? TextInputStyle.Paragraph : TextInputStyle.Short);
+        : SETTINGS.closeQuestion;
+    const input = new TextInputBuilder().setCustomId(config.id).setLabel(config.label.slice(0, 45)).setPlaceholder((config.placeholder || '').slice(0, 100)).setRequired(config.required).setStyle(action === 'close' ? TextInputStyle.Paragraph : TextInputStyle.Short);
     modal.addComponents(new ActionRowBuilder().addComponents(input));
     await interaction.showModal(modal);
 }
@@ -369,6 +390,12 @@ async function handleInteraction(interaction) {
         if (!state) return interaction.reply({ content: 'Ticket controls only work inside an open ticket.', flags: MessageFlags.Ephemeral });
         const action = interaction.customId.split(':').pop();
         if (action === 'claim' || action === 'unclaim') return updateClaim(interaction, channel, state, action === 'claim');
+        if (action === 'escalate') {
+            if (!canManage(interaction.member)) return interaction.reply({ content: 'Only support staff can escalate this ticket.', flags: MessageFlags.Ephemeral });
+            await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+            await channel.send(ticketPayload(escalationContainer(state), [], { allowedMentions: escalationMentions(state) }));
+            return interaction.editReply('Ticket escalated. The opener and Support Admins were notified.');
+        }
         if (!canManage(interaction.member) && action !== 'close') return interaction.reply({ content: 'Only support staff can use this ticket action.', flags: MessageFlags.Ephemeral });
         return showActionModal(interaction, action);
     }
@@ -383,17 +410,6 @@ async function handleInteraction(interaction) {
             await interaction.deferReply({ flags: MessageFlags.Ephemeral });
             await channel.setName(`ticket-${base}`.slice(0, 100));
             return interaction.editReply({ content: `Ticket renamed to **${channel.name}**.` });
-        }
-        if (action === 'escalate') {
-            if (!canManage(interaction.member)) return interaction.reply({ content: 'Only support staff can escalate a ticket.', flags: MessageFlags.Ephemeral });
-            const leadership = categoryFor('leadership');
-            const roleId = leadership?.pingRoleId;
-            const message = interaction.fields.getTextInputValue('escalation_message');
-            await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-            await channel.send(ticketPayload(ticketContainer('⬆️ Leadership escalation', [isId(roleId) ? `<@&${roleId}>` : '', `**Escalated by:** <@${interaction.user.id}>`, `**Message:** ${safeText(message)}`]), [], {
-                allowedMentions: { roles: isId(roleId) ? [roleId] : [], users: [interaction.user.id] },
-            }));
-            return interaction.editReply({ content: isId(roleId) ? 'Escalated and notified Leadership Support.' : 'Escalation posted. Add the Leadership ping role ID in `ticketSystem.js` to notify the role.' });
         }
         if (action === 'close') return closeTicket(interaction, channel, state, interaction.fields.getTextInputValue(SETTINGS.closeQuestion.id));
     }
@@ -445,11 +461,8 @@ const prefixCommands = [
     { name: 'escalate', execute: async (message, args) => {
         const state = getPrefixTicket(message); if (!state || !await staffOnly(message)) return;
         if (!args.length) return message.reply(`Usage: ${SETTINGS.prefix}escalate message for leadership`);
-        const leadership = categoryFor('leadership'); const roleId = leadership?.pingRoleId;
-        await message.channel.send(ticketPayload(ticketContainer('⬆️ Leadership escalation', [`**Escalated by:** <@${message.author.id}>`, `**Message:** ${safeText(args.join(' '))}`]), [], {
-            content: isId(roleId) ? `<@&${roleId}>` : '', allowedMentions: { users: [message.author.id], roles: isId(roleId) ? [roleId] : [] },
-        }));
-        if (!isId(roleId)) await message.reply('Escalation posted. Add the Leadership ping role ID in `ticketSystem.js` to notify the role.');
+        const container = escalationContainer(state).addTextDisplayComponents(new TextDisplayBuilder().setContent(`**Staff note:** ${safeText(args.join(' '))}`));
+        await message.channel.send(ticketPayload(container, [], { allowedMentions: escalationMentions(state) }));
     } },
 ];
 
