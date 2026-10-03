@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const { connectDB } = require('./db');
 const ticketSystem = require('./ticketSystem');
+const { startRobloxGroupCounter } = require('./robloxGroupCounter');
 
 const { DISCORD_TOKEN, CLIENT_ID, GUILD_ID, PREFIX } = process.env;
 
@@ -156,6 +157,7 @@ async function start() {
 
 client.once(Events.ClientReady, c => {
     console.log(`Logged in as ${c.user.tag} (PID ${process.pid})`);
+    startRobloxGroupCounter(c);
     ticketSystem.syncOpenTicketPermissions(c).catch(err => {
         console.error('Failed to sync open ticket permissions:', err);
     });
