@@ -30,12 +30,28 @@ const SETTINGS = {
     transcriptChannelId: '1484312804830740520',
     supportTeamRoleId: '1556041164031787098',
     supportAdminRoleId: '1556041271490121768',
-    panelTitle: 'Maui Support',
-    panelDescription: 'Choose the team that best fits your request. A short form will open so we can get the right details.',
+    panelTitle: '<:maui:1556034121271214141> | Maui Support',
+    panelDescription: `At **Maui**, we strive to provide our community with an organized and reliable support system where all questions, concerns, and requests can be handled efficiently. Before opening a ticket, please take a moment to review the available support categories and select the one that best matches your needs.
+
+Please use the ticket system appropriately and provide accurate information so our team can assist you as efficiently as possible. Misuse of the ticket system, including unnecessary or inappropriate tickets, may result in disciplinary action.
+
+**<:summerkite:1511401136693710898> Support Categories**
+
+> **General Support** — For general questions, assistance, community concerns, or anything that does not fall under another support category.
+
+> **Leadership Support** — For matters requiring assistance from members of the Leadership Team or concerns that need leadership attention.
+
+> **Human Resources Support** — For staff-related concerns, management matters, reports, leave requests, or other Human Resources inquiries.
+
+> **Development Support** — For development-related questions, game issues, bugs, suggestions, or concerns regarding our Development Team.
+
+> **Public Relations Department Support** — For partnership inquiries, affiliate matters, public relations concerns, or other requests involving the Public Relations Department.
+
+Please select the **most appropriate category** from the dropdown below. Selecting the correct option will help ensure your ticket reaches the appropriate team and receives the attention it requires.`,
     panelButtonPlaceholder: 'Choose a support category',
     ticketTitle: 'Support ticket',
     ticketWelcome: 'Thanks for contacting the team. Please share any extra details here and a team member will help shortly.',
-    bannerUrl: '', // Optional hosted image URL. Leave blank to omit the banner.
+    bannerUrl: 'https://yumi.onl/api/files/6ac166de9c1d0ced2e4001f2/raw',
     transcriptTitle: 'Ticket transcript',
     openingQuestions: [
         { id: 'reason', label: 'Why are you opening a ticket?', placeholder: 'Describe what you need help with', required: true, style: TextInputStyle.Paragraph },
@@ -44,10 +60,10 @@ const SETTINGS = {
     closeQuestion: { id: 'close_reason', label: 'Closing reason', placeholder: 'Briefly explain why this ticket is closing', required: true },
     categories: [
         { key: 'general', label: 'General Support', description: 'Questions, help, or general assistance.', emoji: '💬', pingRoleId: '' },
-        { key: 'hr', label: 'Human Resources Support', description: 'People, staffing, or HR related matters.', emoji: '👥', pingRoleId: '' },
-        { key: 'prd', label: 'Public Relations Support', description: 'Product and PRD related questions.', emoji: '📋', pingRoleId: '' },
         { key: 'leadership', label: 'Leadership Support', description: 'Private matters for the leadership team.', emoji: '🛡️', pingRoleId: '' },
-        { key: 'dev', label: 'Development Support', description: 'Technical issues and development help.', emoji: '🛠️', pingRoleId: '' },
+        { key: 'hr', label: 'Human Resources Support', description: 'Staff-related concerns, management matters, reports, leave requests, and HR inquiries.', emoji: '👥', pingRoleId: '' },
+        { key: 'dev', label: 'Development Support', description: 'Development questions, game issues, bugs, and suggestions.', emoji: '🛠️', pingRoleId: '' },
+        { key: 'prd', label: 'Public Relations Department Support', description: 'Partnership inquiries, affiliate matters, and public relations concerns.', emoji: '📋', pingRoleId: '' },
     ],
     // Change labels and emoji freely. Button ids are internal and should stay as-is.
     buttons: { claim: 'Claim', unclaim: 'Unclaim', rename: 'Rename', escalate: 'Escalate', close: 'Close' },
@@ -144,11 +160,12 @@ async function openTicket(interaction, category, answers) {
     const guild = interaction.guild;
     if (!guild) return interaction.reply({ content: 'Tickets can only be opened in a server.', flags: MessageFlags.Ephemeral });
     if (!isId(SETTINGS.supportCategoryId)) return interaction.reply({ content: 'The support channel category ID is not configured in `ticketSystem.js`.', flags: MessageFlags.Ephemeral });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const parent = await guild.channels.fetch(SETTINGS.supportCategoryId).catch(() => null);
-    if (!parent || parent.type !== ChannelType.GuildCategory) return interaction.reply({ content: 'The configured support category was not found. Check its ID in `ticketSystem.js`.', flags: MessageFlags.Ephemeral });
+    if (!parent || parent.type !== ChannelType.GuildCategory) return interaction.editReply({ content: 'The configured support category was not found. Check its ID in `ticketSystem.js`.' });
 
     const existing = guild.channels.cache.find(channel => channel.type === ChannelType.GuildText && stateFromChannel(channel)?.ownerId === interaction.user.id);
-    if (existing) return interaction.reply({ content: `You already have an open ticket: ${existing}`, flags: MessageFlags.Ephemeral });
+    if (existing) return interaction.editReply({ content: `You already have an open ticket: ${existing}` });
 
     const existingNumbers = guild.channels.cache
         .map(channel => channel.name.match(/^ticket-(\d+)-/))
@@ -174,7 +191,6 @@ async function openTicket(interaction, category, answers) {
     const rolePing = isId(category.pingRoleId) ? `<@&${category.pingRoleId}>` : '';
     const content = [rolePing, `<@${interaction.user.id}>`].filter(Boolean).join(' ');
     const lines = [
-        `### ${category.emoji} ${SETTINGS.ticketTitle} · ${category.label}`,
         content,
         SETTINGS.ticketWelcome,
         '',
@@ -185,10 +201,10 @@ async function openTicket(interaction, category, answers) {
         `**Opened:** <t:${Math.floor(state.openedAt / 1000)}:F>`,
         `**Claimed by:** Unclaimed`,
     ];
-    await channel.send(ticketPayload(ticketContainer(`${category.emoji} ${SETTINGS.ticketTitle}`, lines), [ticketButtons(state)], {
+    await channel.send(ticketPayload(ticketContainer(`${category.emoji} ${SETTINGS.ticketTitle} · ${category.label}`, lines, true), [ticketButtons(state)], {
         allowedMentions: { users: [interaction.user.id], roles: isId(category.pingRoleId) ? [category.pingRoleId] : [] },
     }));
-    await interaction.reply({ content: `Your ticket is ready: ${channel}`, flags: MessageFlags.Ephemeral });
+    await interaction.editReply({ content: `Your ticket is ready: ${channel}` });
 }
 
 function openTicketModal(category) {
@@ -210,13 +226,14 @@ async function updateClaim(interaction, channel, state, claim) {
     if (!claim && state.claimerId && state.claimerId !== interaction.user.id && !isSupportAdmin(interaction.member)) {
         return interaction.reply({ content: 'Only the person who claimed this ticket or a Support Admin can unclaim it.', flags: MessageFlags.Ephemeral });
     }
+    await interaction.deferUpdate();
     state.claimerId = claim ? interaction.user.id : null;
     await channel.setTopic(topicFor(state));
     await channel.permissionOverwrites.edit(state.ownerId, {
         ViewChannel: true, ReadMessageHistory: true, SendMessages: !claim || isSupportAdmin(await channel.guild.members.fetch(state.ownerId).catch(() => null)),
     });
     const updated = claimUpdatedContainer(interaction.message, state, claim, interaction.user.id);
-    await interaction.update(ticketPayload(updated, [], { allowedMentions: { users: [interaction.user.id] } }));
+    await interaction.message.edit(ticketPayload(updated, [], { allowedMentions: { users: [interaction.user.id] } }));
 }
 
 async function transcriptHtml(channel, state, category, reason) {
@@ -248,6 +265,7 @@ async function transcriptHtml(channel, state, category, reason) {
 
 async function closeTicket(interaction, channel, state, reason) {
     if (!canManage(interaction.member) && state.ownerId !== interaction.user.id) return interaction.reply({ content: 'Only the ticket opener or support staff can close this ticket.', flags: MessageFlags.Ephemeral });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const category = categoryFor(state.categoryKey);
     const file = await transcriptHtml(channel, state, category, reason);
     const logChannel = isId(SETTINGS.transcriptChannelId)
@@ -265,13 +283,13 @@ async function closeTicket(interaction, channel, state, reason) {
         await transcriptTarget.send(ticketPayload(summary, [], { files: [file], allowedMentions: { users: [state.ownerId, state.claimerId, interaction.user.id].filter(Boolean) } }));
     }
     if (transcriptTarget === channel) {
-        await interaction.reply({ content: 'Transcript saved in this ticket. It will be archived in place because no transcript log channel is configured.', flags: MessageFlags.Ephemeral });
+        await interaction.editReply({ content: 'Transcript saved in this ticket. It will be archived in place because no transcript log channel is configured.' });
         await channel.setName(`closed-${channel.name}`.slice(0, 100)).catch(() => null);
         await channel.permissionOverwrites.edit(state.ownerId, { ViewChannel: false, SendMessages: false }).catch(() => null);
         await channel.setTopic(`maui-closed|${state.ownerId}|${state.categoryKey}|${state.claimerId || ''}|${state.openedAt}`.slice(0, 1024)).catch(() => null);
         return;
     }
-    await interaction.reply({ content: 'Transcript saved. This ticket will close in 5 seconds.', flags: MessageFlags.Ephemeral });
+    await interaction.editReply({ content: 'Transcript saved. This ticket will close in 5 seconds.' });
     setTimeout(() => channel.delete(`Ticket closed by ${interaction.user.tag}: ${reason}`).catch(() => null), 5000);
 }
 
@@ -316,18 +334,20 @@ async function handleInteraction(interaction) {
         if (action === 'rename') {
             if (!canManage(interaction.member)) return interaction.reply({ content: 'Only support staff can rename a ticket.', flags: MessageFlags.Ephemeral });
             const base = slug(interaction.fields.getTextInputValue('ticket_name'));
+            await interaction.deferReply({ flags: MessageFlags.Ephemeral });
             await channel.setName(`ticket-${base}`.slice(0, 100));
-            return interaction.reply({ content: `Ticket renamed to **${channel.name}**.`, flags: MessageFlags.Ephemeral });
+            return interaction.editReply({ content: `Ticket renamed to **${channel.name}**.` });
         }
         if (action === 'escalate') {
             if (!canManage(interaction.member)) return interaction.reply({ content: 'Only support staff can escalate a ticket.', flags: MessageFlags.Ephemeral });
             const leadership = categoryFor('leadership');
             const roleId = leadership?.pingRoleId;
             const message = interaction.fields.getTextInputValue('escalation_message');
+            await interaction.deferReply({ flags: MessageFlags.Ephemeral });
             await channel.send(ticketPayload(ticketContainer('⬆️ Leadership escalation', [isId(roleId) ? `<@&${roleId}>` : '', `**Escalated by:** <@${interaction.user.id}>`, `**Message:** ${safeText(message)}`]), [], {
                 allowedMentions: { roles: isId(roleId) ? [roleId] : [], users: [interaction.user.id] },
             }));
-            return interaction.reply({ content: isId(roleId) ? 'Escalated and notified Leadership Support.' : 'Escalation posted. Add the Leadership ping role ID in `ticketSystem.js` to notify the role.', flags: MessageFlags.Ephemeral });
+            return interaction.editReply({ content: isId(roleId) ? 'Escalated and notified Leadership Support.' : 'Escalation posted. Add the Leadership ping role ID in `ticketSystem.js` to notify the role.' });
         }
         if (action === 'close') return closeTicket(interaction, channel, state, interaction.fields.getTextInputValue(SETTINGS.closeQuestion.id));
     }
