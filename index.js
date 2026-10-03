@@ -7,6 +7,7 @@ const path = require('path');
 const { connectDB } = require('./db');
 const ticketSystem = require('./ticketSystem');
 const { startRobloxGroupCounter } = require('./robloxGroupCounter');
+const { joinIdleVoiceChannel } = require('./voiceAutoJoin');
 
 const { DISCORD_TOKEN, CLIENT_ID, GUILD_ID, PREFIX } = process.env;
 
@@ -17,6 +18,7 @@ const client = new Client({
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.GuildMembers,
         GatewayIntentBits.GuildPresences,
+        GatewayIntentBits.GuildVoiceStates,
     ]
 });
 
@@ -158,6 +160,9 @@ async function start() {
 client.once(Events.ClientReady, c => {
     console.log(`Logged in as ${c.user.tag} (PID ${process.pid})`);
     startRobloxGroupCounter(c);
+    joinIdleVoiceChannel(c).catch(err => {
+        console.error('Failed to join configured voice channel:', err.message);
+    });
     ticketSystem.syncOpenTicketPermissions(c).catch(err => {
         console.error('Failed to sync open ticket permissions:', err);
     });
