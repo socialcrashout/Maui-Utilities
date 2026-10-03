@@ -151,30 +151,21 @@ async function syncOpenTicketPermissions(client) {
     }
 }
 
-function ticketButtons(state) {
-    const claimed = Boolean(state.claimerId);
+function ticketButtons() {
     return new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId(`maui:ticket:${claimed ? 'unclaim' : 'claim'}`).setLabel(claimed ? SETTINGS.buttons.unclaim : SETTINGS.buttons.claim).setStyle(claimed ? ButtonStyle.Secondary : ButtonStyle.Success),
+        new ButtonBuilder().setCustomId('maui:ticket:claim').setLabel(SETTINGS.buttons.claim).setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId('maui:ticket:unclaim').setLabel(SETTINGS.buttons.unclaim).setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('maui:ticket:rename').setLabel(SETTINGS.buttons.rename).setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('maui:ticket:escalate').setLabel(SETTINGS.buttons.escalate).setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('maui:ticket:close').setLabel(SETTINGS.buttons.close).setStyle(ButtonStyle.Danger),
     );
 }
 
-function claimUpdatedContainer(message, state, claim, userId) {
-    const api = message.components[0].toJSON();
-    const updateClaimButton = component => {
-        if (component.type === 2 && ['maui:ticket:claim', 'maui:ticket:unclaim'].includes(component.custom_id)) {
-            component.custom_id = `maui:ticket:${claim ? 'unclaim' : 'claim'}`;
-            component.label = claim ? SETTINGS.buttons.unclaim : SETTINGS.buttons.claim;
-            component.style = claim ? ButtonStyle.Secondary : ButtonStyle.Success;
-        }
-        for (const child of component.components || []) updateClaimButton(child);
-    };
-    updateClaimButton(api);
-    return new ContainerBuilder(api).addTextDisplayComponents(new TextDisplayBuilder().setContent(
-        `-# ${claim ? `Claimed by <@${userId}> · opener and claimer can chat; other support roles are view-only` : `Unclaimed by <@${userId}> · opener can chat; support roles remain view-only`}`
-    ));
+function claimStatusContainer(claimed, userId) {
+    return ticketContainer(claimed ? '🙋 Ticket Claimed' : '↩️ Ticket Unclaimed', [
+        claimed ? `**Claimed by:** <@${userId}>` : `**Unclaimed by:** <@${userId}>`,
+        claimed ? 'The ticket opener and assigned claimer can chat here. Other support roles can view the ticket.' : 'The ticket opener can continue chatting. Support roles remain view-only until someone claims it.',
+    ]);
 }
 
 function escalationContainer(state) {
@@ -262,7 +253,7 @@ async function openTicket(interaction, category, answers) {
         `**Opened:** <t:${Math.floor(state.openedAt / 1000)}:F>`,
         `**Claimed by:** Unclaimed`,
     ];
-    await channel.send(ticketPayload(ticketContainer(`${category.emoji} ${SETTINGS.ticketTitle} · ${category.label}`, lines, true), [ticketButtons(state)], {
+    await channel.send(ticketPayload(ticketContainer(`${category.emoji} ${SETTINGS.ticketTitle} · ${category.label}`, lines, true), [ticketButtons()], {
         allowedMentions: { users: [interaction.user.id], roles: pingRoleIds },
     }));
     await interaction.editReply({ content: `Your ticket is ready: ${channel}` });
@@ -281,10 +272,11 @@ function openTicketModal(category) {
 
 async function updateClaim(interaction, channel, state, claim) {
     if (!canManage(interaction.member)) return interaction.reply({ content: 'Only the support team can claim or unclaim tickets.', flags: MessageFlags.Ephemeral });
-    if (claim && state.claimerId && state.claimerId !== interaction.user.id && !isSupportAdmin(interaction.member)) {
-        return interaction.reply({ content: `This ticket is already claimed by <@${state.claimerId}>.`, flags: MessageFlags.Ephemeral });
+    if (claim && state.claimerId) {
+        return interaction.reply({ content: state.claimerId === interaction.user.id ? 'You already claimed this ticket. Use Unclaim when you are done.' : `This ticket is already claimed by <@${state.claimerId}>.`, flags: MessageFlags.Ephemeral });
     }
-    if (!claim && state.claimerId && state.claimerId !== interaction.user.id && !isSupportAdmin(interaction.member)) {
+    if (!claim && !state.claimerId) return interaction.reply({ content: 'This ticket is not currently claimed.', flags: MessageFlags.Ephemeral });
+    if (!claim && state.claimerId !== interaction.user.id && !isSupportAdmin(interaction.member)) {
         return interaction.reply({ content: 'Only the person who claimed this ticket or a Support Admin can unclaim it.', flags: MessageFlags.Ephemeral });
     }
     await interaction.deferUpdate();
@@ -298,8 +290,9 @@ async function updateClaim(interaction, channel, state, claim) {
     } else if (previousClaimerId && previousClaimerId !== state.ownerId) {
         await channel.permissionOverwrites.delete(previousClaimerId).catch(() => null);
     }
-    const updated = claimUpdatedContainer(interaction.message, state, claim, interaction.user.id);
-    await interaction.message.edit(ticketPayload(updated, [], { allowedMentions: { users: [interaction.user.id] } }));
+    await channel.send(ticketPayload(claimStatusContainer(claim, interaction.user.id), [], {
+        allowedMentions: { users: [interaction.user.id] },
+    }));
 }
 
 async function transcriptHtml(channel, state, category, reason) {
@@ -428,30 +421,29 @@ function getPrefixTicket(message) {
 
 const prefixCommands = [
     { name: 'ticketpanel', execute: async message => { if (await staffOnly(message)) await createPanel(message); } },
-    { name: 'claim', execute: async (message, _args, client) => {
+    { name: 'claim', execute: async message => {
         const state = getPrefixTicket(message); if (!state || !await staffOnly(message)) return;
-        if (state.claimerId && state.claimerId !== message.author.id && !isSupportAdmin(message.member)) return message.reply(`Already claimed by <@${state.claimerId}>.`);
+        if (state.claimerId) return message.reply(state.claimerId === message.author.id ? `You already claimed this ticket. Use ${SETTINGS.prefix}unclaim when you are done.` : `Already claimed by <@${state.claimerId}>.`);
         state.claimerId = message.author.id; await message.channel.setTopic(topicFor(state));
         await applyStaffTypingPolicy(message.channel, state);
         await message.channel.permissionOverwrites.edit(state.ownerId, { ViewChannel: true, ReadMessageHistory: true, SendMessages: true });
         await message.channel.permissionOverwrites.edit(message.author.id, { ViewChannel: true, ReadMessageHistory: true, SendMessages: true });
-        const recent = await message.channel.messages.fetch({ limit: 100 });
-        const controls = recent.find(m => m.author.id === client.user.id && m.components.length && m.components[0].toJSON().components?.some(c => c.type === 1));
-        if (controls) await controls.edit(ticketPayload(claimUpdatedContainer(controls, state, true, message.author.id), [], { allowedMentions: { users: [message.author.id] } }));
-        await message.reply(`Ticket claimed by <@${message.author.id}>.`);
+        await message.channel.send(ticketPayload(claimStatusContainer(true, message.author.id), [], {
+            allowedMentions: { users: [message.author.id] },
+        }));
     } },
-    { name: 'unclaim', execute: async (message, _args, client) => {
+    { name: 'unclaim', execute: async message => {
         const state = getPrefixTicket(message); if (!state || !await staffOnly(message)) return;
-        if (state.claimerId && state.claimerId !== message.author.id && !isSupportAdmin(message.member)) return message.reply('Only the current claimer or a Support Admin can unclaim this ticket.');
+        if (!state.claimerId) return message.reply('This ticket is not currently claimed.');
+        if (state.claimerId !== message.author.id && !isSupportAdmin(message.member)) return message.reply('Only the current claimer or a Support Admin can unclaim this ticket.');
         const previousClaimerId = state.claimerId;
         state.claimerId = null; await message.channel.setTopic(topicFor(state));
         await applyStaffTypingPolicy(message.channel, state);
         await message.channel.permissionOverwrites.edit(state.ownerId, { ViewChannel: true, ReadMessageHistory: true, SendMessages: true });
         if (previousClaimerId && previousClaimerId !== state.ownerId) await message.channel.permissionOverwrites.delete(previousClaimerId).catch(() => null);
-        const recent = await message.channel.messages.fetch({ limit: 100 });
-        const controls = recent.find(m => m.author.id === client.user.id && m.components.length && m.components[0].toJSON().components?.some(c => c.type === 1));
-        if (controls) await controls.edit(ticketPayload(claimUpdatedContainer(controls, state, false, message.author.id), [], { allowedMentions: { users: [message.author.id] } }));
-        await message.reply('Ticket unclaimed. The opener can reply again.');
+        await message.channel.send(ticketPayload(claimStatusContainer(false, message.author.id), [], {
+            allowedMentions: { users: [message.author.id] },
+        }));
     } },
     { name: 'rename', execute: async (message, args) => {
         const state = getPrefixTicket(message); if (!state || !await staffOnly(message)) return;
