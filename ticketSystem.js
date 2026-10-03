@@ -25,11 +25,11 @@ const {
 const SETTINGS = {
     prefix: process.env.PREFIX || '-',
     // The parent channel category where every ticket channel is created.
-    supportCategoryId: '',
+    supportCategoryId: '1474142910101586024',
     // Optional channel where closed ticket transcripts are posted.
-    transcriptChannelId: '',
-    supportTeamRoleId: '',
-    supportAdminRoleId: '',
+    transcriptChannelId: '1484312804830740520',
+    supportTeamRoleId: '1556041164031787098',
+    supportAdminRoleId: '1556041271490121768',
     panelTitle: 'Maui Support',
     panelDescription: 'Choose the team that best fits your request. A short form will open so we can get the right details.',
     panelButtonPlaceholder: 'Choose a support category',
