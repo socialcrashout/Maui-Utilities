@@ -17,16 +17,38 @@ function makeCounterMessage(memberCount) {
 }
 
 async function getMemberCount() {
-    const response = await fetch(`https://groups.roblox.com/v2/groups?groupIds=${GROUP_ID}`, {
-        headers: { Accept: 'application/json' },
-        signal: AbortSignal.timeout(15_000),
-    });
-    if (!response.ok) throw new Error(`Roblox groups API returned HTTP ${response.status}`);
+    const endpoints = [
+        `https://groups.roblox.com/v1/groups/${GROUP_ID}`,
+        `https://groups.roblox.com/v2/groups?groupIds=${GROUP_ID}`,
+    ];
+    let lastError = 'Roblox did not include a member count in its response';
 
-    const result = await response.json();
-    const group = result.data?.find(item => String(item.id) === GROUP_ID);
-    if (!group || !Number.isFinite(group.memberCount)) throw new Error(`Roblox did not return a member count for group ${GROUP_ID}`);
-    return group.memberCount;
+    for (const url of endpoints) {
+        try {
+            const response = await fetch(url, {
+                headers: { Accept: 'application/json' },
+                signal: AbortSignal.timeout(15_000),
+            });
+            const result = await response.json().catch(() => null);
+            if (!response.ok) {
+                lastError = `Roblox groups API returned HTTP ${response.status}`;
+                continue;
+            }
+
+            const groups = Array.isArray(result?.data) ? result.data : [];
+            const group = groups.find(item => String(item.id ?? item.group?.id) === GROUP_ID) || groups[0];
+            const rawCount = result?.memberCount ?? group?.memberCount ?? group?.group?.memberCount;
+            const memberCount = Number(rawCount);
+            if (Number.isSafeInteger(memberCount) && memberCount >= 0) return memberCount;
+
+            const responseFields = result && typeof result === 'object' ? Object.keys(result).join(', ') : 'non-JSON response';
+            lastError = `Roblox response from ${new URL(url).pathname} had no usable memberCount (fields: ${responseFields})`;
+        } catch (error) {
+            lastError = error.message;
+        }
+    }
+
+    throw new Error(`Unable to read member count for Roblox group ${GROUP_ID}: ${lastError}`);
 }
 
 async function updateRobloxGroupCounter(client) {
