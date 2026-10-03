@@ -69,12 +69,7 @@ module.exports = {
 
                 state = { count: number, lastUserId: message.author.id };
                 saveState();
-                await sendStatus(
-                    message.channel,
-                    'Count accepted',
-                    `**${number}** — <@${message.author.id}> counted. The next number is **${number + 1}**.`,
-                    { allowedMentions: { users: [message.author.id] } }
-                );
+                await message.react('✅');
             })
             .catch(error => console.error('Counting system error:', error));
     },

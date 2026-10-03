@@ -3,6 +3,7 @@ const GROUP_ID = '377591137';
 const CHANNEL_ID = '1550940155681050725';
 const REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const MARKER = `Roblox group ${GROUP_ID} member counter`;
+const COUNTER_SIGNATURE = '🎉 We are now at ';
 
 let refreshTimer;
 
@@ -12,7 +13,6 @@ function makeCounterMessage(memberCount) {
     return [
         `🎉 We are now at **${memberCount.toLocaleString('en-US')} members!**`,
         `🎯 Next goal: **${nextGoal.toLocaleString('en-US')} members** — **${remaining.toLocaleString('en-US')} to go!**`,
-        `-# ${MARKER} · goal advances by 100 members`,
     ].join('\n\n');
 }
 
@@ -60,7 +60,10 @@ async function updateRobloxGroupCounter(client) {
     const memberCount = await getMemberCount();
     const content = makeCounterMessage(memberCount);
     const recent = await channel.messages.fetch({ limit: 50 });
-    const currentPost = recent.find(message => message.author.id === client.user.id && message.content.includes(MARKER));
+    // Keep editing the same post. MARKER finds the older version during migration;
+    // the signature finds it after the visible marker has been removed.
+    const currentPost = recent.find(message => message.author.id === client.user.id &&
+        (message.content.includes(MARKER) || message.content.startsWith(COUNTER_SIGNATURE)));
 
     if (currentPost) {
         if (currentPost.content !== content) await currentPost.edit({ content, allowedMentions: { parse: [] } });
