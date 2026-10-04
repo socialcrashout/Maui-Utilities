@@ -545,23 +545,35 @@ const prefixCommands = [
     { name: 'rename', execute: async (message, args = []) => {
         const state = getPrefixTicket(message); if (!state || !await staffOnly(message)) return;
         const requestedName = args.join(' ').trim();
-        if (!requestedName) return message.reply(`Usage: ${SETTINGS.prefix}rename new-ticket-name`);
+        if (!requestedName) return message.channel.send(`Usage: ${SETTINGS.prefix}rename new-ticket-name`);
 
         const nextName = `ticket-${slug(requestedName)}`.slice(0, 100);
-        if (message.channel.name === nextName) return message.reply(`This ticket is already named **${nextName}**.`);
+        if (message.channel.name === nextName) return message.channel.send(`This ticket is already named **${nextName}**.`);
 
+        // A prefix command cannot be deferred like a slash command, so acknowledge
+        // it immediately while Discord processes the channel rename.
+        const renameResult = message.channel.setName(nextName, `Ticket renamed by ${message.author.tag}`)
+            .then(() => null, error => error);
+        let statusMessage;
         try {
-            await message.channel.setName(nextName, `Ticket renamed by ${message.author.tag}`);
+            statusMessage = await message.channel.send(`Renaming ticket to **${nextName}**…`);
         } catch (error) {
+            console.error(`Could not acknowledge rename for ticket ${message.channel.id}:`, error);
+            await renameResult;
+            return;
+        }
+
+        const error = await renameResult;
+        if (error) {
             console.error(`Could not rename ticket ${message.channel.id}:`, error);
             const reason = error.code === 50013
                 ? 'The bot needs Manage Channels permission in this ticket.'
                 : error.code === 429
                     ? 'Discord is rate limiting channel renames. Please wait a little and try again.'
                     : `Discord rejected the rename: ${error.message}`;
-            return message.reply(`Could not rename this ticket. ${reason}`);
+            return statusMessage.edit(`Could not rename this ticket. ${reason}`).catch(console.error);
         }
-        return message.reply(`Renamed to **${message.channel.name}**.`);
+        return statusMessage.edit(`Renamed to **${message.channel.name}**.`).catch(console.error);
     } },
     { name: 'escalate', execute: async (message, args) => {
         const state = getPrefixTicket(message); if (!state || !await staffOnly(message)) return;
