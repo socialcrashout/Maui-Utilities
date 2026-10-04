@@ -635,7 +635,6 @@ const prefixCommands = [
     { name: 'close', execute: async (message, args = []) => {
         const state = getPrefixTicket(message); if (!state) return;
         if (!canUseSupportButtons(message.member, state)) return message.reply('Only this ticket’s department team or Support Admin can use this command.');
-        if (state.claimerId) return message.reply(`This command only closes unclaimed tickets. This ticket is claimed by <@${state.claimerId}>.`);
         const reason = safeText(args.join(' ') || 'Closed by support staff using -close');
         const deleting = await finishClose(message.guild, message.channel, state, message.author.id, message.author.tag, reason);
         if (deleting) return message.reply('Ticket closed. The transcript was saved, and this channel will be deleted in 5 seconds.');
