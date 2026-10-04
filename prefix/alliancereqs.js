@@ -11,8 +11,8 @@ function makeRequirementsMessage(userId) {
         '',
         '<:summerpopsiclestick:1511371881817702450> **Requirements**',
         '',
-        '<:s_dot:1556066525776187515> Your **Roblox group must have at least 300 members**.',
-        '<:s_dot:1556066525776187515> Your **Discord server must have at least 250 members**, excluding bots.',
+        '<:s_dot:1556066525776187515> Your **Roblox group must have at least 400 members**.',
+        '<:s_dot:1556066525776187515> Your **Discord server must have at least 350 members**, excluding bots.',
         '<:s_dot:1556066525776187515> Your Discord server must be **organized and easy to navigate**.',
         '<:s_dot:1556066525776187515> Your server must maintain a **professional appearance** and overall presentation.',
         '<:s_dot:1556066525776187515> Your organization must be willing to **follow and comply with Maui’s Terms of Service and Public Relations Department guidelines**.',
@@ -42,6 +42,9 @@ module.exports = {
             components: [makeRequirementsMessage(target.id)],
             flags: MessageFlags.IsComponentsV2,
             allowedMentions: { users: [target.id] },
+        });
+        await message.delete().catch(error => {
+            console.warn('Could not delete the -alliancereqs command message:', error.message);
         });
     },
 };
