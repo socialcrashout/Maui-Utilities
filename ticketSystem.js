@@ -445,6 +445,9 @@ const prefixCommands = [
         await message.channel.send(ticketPayload(container, [], {
             allowedMentions: { users: [target.id] },
         }));
+        await message.delete().catch(error => {
+            console.warn('Could not delete the -inactive command message:', error.message);
+        });
     } },
     { name: 'claim', execute: async message => {
         const state = getPrefixTicket(message); if (!state || !await staffOnly(message)) return;
