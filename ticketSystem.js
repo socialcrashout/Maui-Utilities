@@ -114,6 +114,11 @@ function canManage(member) {
         SETTINGS.categories.some(category => isId(category.pingRoleId) && member?.roles?.cache?.has(category.pingRoleId));
 }
 
+function canUseSupportButtons(member) {
+    return [SETTINGS.supportTeamRoleId, SETTINGS.supportAdminRoleId]
+        .some(roleId => isId(roleId) && member?.roles?.cache?.has(roleId));
+}
+
 async function applyStaffTypingPolicy(channel, state) {
     const category = categoryFor(state.categoryKey);
     const adminRoleId = SETTINGS.supportAdminRoleId;
@@ -271,7 +276,7 @@ function openTicketModal(category) {
 }
 
 async function updateClaim(interaction, channel, state, claim) {
-    if (!canManage(interaction.member)) return interaction.reply({ content: 'Only the support team can claim or unclaim tickets.', flags: MessageFlags.Ephemeral });
+    if (!canUseSupportButtons(interaction.member)) return interaction.reply({ content: 'Only members with the Support Team or Support Admin role can claim or unclaim tickets.', flags: MessageFlags.Ephemeral });
     if (claim && state.claimerId) {
         return interaction.reply({ content: state.claimerId === interaction.user.id ? 'You already claimed this ticket. Use Unclaim when you are done.' : `This ticket is already claimed by <@${state.claimerId}>.`, flags: MessageFlags.Ephemeral });
     }
@@ -384,12 +389,17 @@ async function handleInteraction(interaction) {
         const action = interaction.customId.split(':').pop();
         if (action === 'claim' || action === 'unclaim') return updateClaim(interaction, channel, state, action === 'claim');
         if (action === 'escalate') {
-            if (!canManage(interaction.member)) return interaction.reply({ content: 'Only support staff can escalate this ticket.', flags: MessageFlags.Ephemeral });
+            if (!canUseSupportButtons(interaction.member)) return interaction.reply({ content: 'Only members with the Support Team or Support Admin role can escalate tickets.', flags: MessageFlags.Ephemeral });
             await interaction.deferReply({ flags: MessageFlags.Ephemeral });
             await channel.send(ticketPayload(escalationContainer(state), [], { allowedMentions: escalationMentions(state) }));
             return interaction.editReply('Ticket escalated. The opener and Support Admins were notified.');
         }
-        if (!canManage(interaction.member) && action !== 'close') return interaction.reply({ content: 'Only support staff can use this ticket action.', flags: MessageFlags.Ephemeral });
+        if (action === 'rename' && !canUseSupportButtons(interaction.member)) {
+            return interaction.reply({ content: 'Only members with the Support Team or Support Admin role can rename tickets.', flags: MessageFlags.Ephemeral });
+        }
+        if (action === 'close' && !canManage(interaction.member) && state.ownerId !== interaction.user.id) {
+            return interaction.reply({ content: 'Only the ticket opener or support staff can close this ticket.', flags: MessageFlags.Ephemeral });
+        }
         return showActionModal(interaction, action);
     }
     if (interaction.isModalSubmit() && interaction.customId.startsWith('maui:ticket:')) {
@@ -398,7 +408,7 @@ async function handleInteraction(interaction) {
         const state = channel && stateFromChannel(channel);
         if (!state) return interaction.reply({ content: 'This ticket is no longer open.', flags: MessageFlags.Ephemeral });
         if (action === 'rename') {
-            if (!canManage(interaction.member)) return interaction.reply({ content: 'Only support staff can rename a ticket.', flags: MessageFlags.Ephemeral });
+            if (!canUseSupportButtons(interaction.member)) return interaction.reply({ content: 'Only members with the Support Team or Support Admin role can rename tickets.', flags: MessageFlags.Ephemeral });
             const base = slug(interaction.fields.getTextInputValue('ticket_name'));
             await interaction.deferReply({ flags: MessageFlags.Ephemeral });
             await channel.setName(`ticket-${base}`.slice(0, 100));
@@ -421,6 +431,17 @@ function getPrefixTicket(message) {
 
 const prefixCommands = [
     { name: 'ticketpanel', execute: async message => { if (await staffOnly(message)) await createPanel(message); } },
+    { name: 'inactive', execute: async message => {
+        const state = getPrefixTicket(message); if (!state || !await staffOnly(message)) return;
+        const container = ticketContainer('<:maui:1556034121271214141> | **Ticket Inactivity Notice**', [
+            `-# <@${state.ownerId}>`,
+            '',
+            '<:summerpopsiclestick:1511371881817702450> This ticket has been marked as **inactive** due to no recent response or activity. If you still require assistance, please respond within **24 hours** to prevent this ticket from being closed. If no response is received within this timeframe, the ticket will be **closed**.',
+        ]);
+        await message.channel.send(ticketPayload(container, [], {
+            allowedMentions: { users: [state.ownerId] },
+        }));
+    } },
     { name: 'claim', execute: async message => {
         const state = getPrefixTicket(message); if (!state || !await staffOnly(message)) return;
         if (state.claimerId) return message.reply(state.claimerId === message.author.id ? `You already claimed this ticket. Use ${SETTINGS.prefix}unclaim when you are done.` : `Already claimed by <@${state.claimerId}>.`);
