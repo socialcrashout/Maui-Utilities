@@ -113,15 +113,16 @@ function isSupportAdmin(member) {
         (isId(SETTINGS.supportAdminRoleId) && member?.roles?.cache?.has(SETTINGS.supportAdminRoleId));
 }
 
-function canManage(member) {
-    return isSupportAdmin(member) ||
-        (isId(SETTINGS.supportTeamRoleId) && member?.roles?.cache?.has(SETTINGS.supportTeamRoleId)) ||
-        SETTINGS.categories.some(category => isId(category.pingRoleId) && member?.roles?.cache?.has(category.pingRoleId));
+function canManage(member, state) {
+    if (isSupportAdmin(member)) return true;
+    const roleIds = state
+        ? [ticketStaffRoleId(state)]
+        : [SETTINGS.supportTeamRoleId, ...SETTINGS.categories.map(category => category.pingRoleId)];
+    return roleIds.some(roleId => isId(roleId) && member?.roles?.cache?.has(roleId));
 }
 
-function canUseSupportButtons(member) {
-    return [SETTINGS.supportTeamRoleId, SETTINGS.supportAdminRoleId]
-        .some(roleId => isId(roleId) && member?.roles?.cache?.has(roleId));
+function canUseSupportButtons(member, state) {
+    return canManage(member, state);
 }
 
 async function applyStaffTypingPolicy(channel, state) {
@@ -133,20 +134,45 @@ async function applyStaffTypingPolicy(channel, state) {
         ...SETTINGS.categories.map(category => category.pingRoleId),
     ].filter(isId));
     // Keep each ticket limited to its department role and Support Admins.
-    await channel.permissionOverwrites.edit(channel.guild.roles.everyone.id, {
+    const updates = [channel.permissionOverwrites.edit(channel.guild.roles.everyone.id, {
         ViewChannel: false,
         ReadMessageHistory: false,
         SendMessages: false,
-    });
+    })];
     for (const roleId of staffRoleIds) {
         const canView = roleId === adminRoleId || roleId === ticketRoleId;
         const canChat = roleId === adminRoleId || (!state.claimerId && roleId === ticketRoleId);
-        await channel.permissionOverwrites.edit(roleId, {
+        updates.push(channel.permissionOverwrites.edit(roleId, {
             ViewChannel: canView,
             ReadMessageHistory: canView,
             SendMessages: canChat,
-        });
+        }));
     }
+    await Promise.all(updates);
+}
+
+async function saveClaimState(channel, state, previousClaimerId = null) {
+    const ticketRoleId = ticketStaffRoleId(state);
+    const updates = [
+        channel.setTopic(topicFor(state)),
+        channel.permissionOverwrites.edit(ticketRoleId, {
+            ViewChannel: true,
+            ReadMessageHistory: true,
+            SendMessages: !state.claimerId,
+        }),
+    ];
+
+    if (state.claimerId) {
+        updates.push(channel.permissionOverwrites.edit(state.claimerId, {
+            ViewChannel: true,
+            ReadMessageHistory: true,
+            SendMessages: true,
+        }));
+    } else if (previousClaimerId && previousClaimerId !== state.ownerId) {
+        updates.push(channel.permissionOverwrites.delete(previousClaimerId).catch(() => null));
+    }
+
+    await Promise.all(updates);
 }
 
 async function syncOpenTicketPermissions(client) {
@@ -297,7 +323,7 @@ function openTicketModal(category) {
 }
 
 async function updateClaim(interaction, channel, state, claim) {
-    if (!canUseSupportButtons(interaction.member)) return interaction.reply({ content: 'Only members with the Support Team or Support Admin role can claim or unclaim tickets.', flags: MessageFlags.Ephemeral });
+    if (!canUseSupportButtons(interaction.member, state)) return interaction.reply({ content: 'Only this ticket’s department team or Support Admin can claim or unclaim it.', flags: MessageFlags.Ephemeral });
     if (claim && state.claimerId) {
         return interaction.reply({ content: state.claimerId === interaction.user.id ? 'You already claimed this ticket. Use Unclaim when you are done.' : `This ticket is already claimed by <@${state.claimerId}>.`, flags: MessageFlags.Ephemeral });
     }
@@ -308,14 +334,7 @@ async function updateClaim(interaction, channel, state, claim) {
     await interaction.deferUpdate();
     const previousClaimerId = state.claimerId;
     state.claimerId = claim ? interaction.user.id : null;
-    await channel.setTopic(topicFor(state));
-    await applyStaffTypingPolicy(channel, state);
-    await channel.permissionOverwrites.edit(state.ownerId, { ViewChannel: true, ReadMessageHistory: true, SendMessages: true });
-    if (claim) {
-        await channel.permissionOverwrites.edit(interaction.user.id, { ViewChannel: true, ReadMessageHistory: true, SendMessages: true });
-    } else if (previousClaimerId && previousClaimerId !== state.ownerId) {
-        await channel.permissionOverwrites.delete(previousClaimerId).catch(() => null);
-    }
+    await saveClaimState(channel, state, previousClaimerId);
     await channel.send(ticketPayload(claimStatusContainer(claim, interaction.user.id), [], {
         allowedMentions: { users: [interaction.user.id] },
     }));
@@ -349,7 +368,7 @@ async function transcriptHtml(channel, state, category, reason) {
 }
 
 async function closeTicket(interaction, channel, state, reason) {
-    if (!canManage(interaction.member) && state.ownerId !== interaction.user.id) return interaction.reply({ content: 'Only the ticket opener or support staff can close this ticket.', flags: MessageFlags.Ephemeral });
+    if (!canManage(interaction.member, state) && state.ownerId !== interaction.user.id) return interaction.reply({ content: 'Only the ticket opener, its department team, or Support Admin can close this ticket.', flags: MessageFlags.Ephemeral });
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const category = categoryFor(state.categoryKey);
     const file = await transcriptHtml(channel, state, category, reason);
@@ -410,16 +429,16 @@ async function handleInteraction(interaction) {
         const action = interaction.customId.split(':').pop();
         if (action === 'claim' || action === 'unclaim') return updateClaim(interaction, channel, state, action === 'claim');
         if (action === 'escalate') {
-            if (!canUseSupportButtons(interaction.member)) return interaction.reply({ content: 'Only members with the Support Team or Support Admin role can escalate tickets.', flags: MessageFlags.Ephemeral });
+            if (!canUseSupportButtons(interaction.member, state)) return interaction.reply({ content: 'Only this ticket’s department team or Support Admin can escalate it.', flags: MessageFlags.Ephemeral });
             await interaction.deferReply({ flags: MessageFlags.Ephemeral });
             await channel.send(ticketPayload(escalationContainer(state), [], { allowedMentions: escalationMentions(state) }));
             return interaction.editReply('Ticket escalated. The opener and Support Admins were notified.');
         }
-        if (action === 'rename' && !canUseSupportButtons(interaction.member)) {
-            return interaction.reply({ content: 'Only members with the Support Team or Support Admin role can rename tickets.', flags: MessageFlags.Ephemeral });
+        if (action === 'rename' && !canUseSupportButtons(interaction.member, state)) {
+            return interaction.reply({ content: 'Only this ticket’s department team or Support Admin can rename it.', flags: MessageFlags.Ephemeral });
         }
-        if (action === 'close' && !canManage(interaction.member) && state.ownerId !== interaction.user.id) {
-            return interaction.reply({ content: 'Only the ticket opener or support staff can close this ticket.', flags: MessageFlags.Ephemeral });
+        if (action === 'close' && !canManage(interaction.member, state) && state.ownerId !== interaction.user.id) {
+            return interaction.reply({ content: 'Only the ticket opener, its department team, or Support Admin can close this ticket.', flags: MessageFlags.Ephemeral });
         }
         return showActionModal(interaction, action);
     }
@@ -429,7 +448,7 @@ async function handleInteraction(interaction) {
         const state = channel && stateFromChannel(channel);
         if (!state) return interaction.reply({ content: 'This ticket is no longer open.', flags: MessageFlags.Ephemeral });
         if (action === 'rename') {
-            if (!canUseSupportButtons(interaction.member)) return interaction.reply({ content: 'Only members with the Support Team or Support Admin role can rename tickets.', flags: MessageFlags.Ephemeral });
+            if (!canUseSupportButtons(interaction.member, state)) return interaction.reply({ content: 'Only this ticket’s department team or Support Admin can rename it.', flags: MessageFlags.Ephemeral });
             const base = slug(interaction.fields.getTextInputValue('ticket_name'));
             await interaction.deferReply({ flags: MessageFlags.Ephemeral });
             await channel.setName(`ticket-${base}`.slice(0, 100));
@@ -468,10 +487,8 @@ const prefixCommands = [
     { name: 'claim', execute: async message => {
         const state = getPrefixTicket(message); if (!state || !await staffOnly(message)) return;
         if (state.claimerId) return message.reply(state.claimerId === message.author.id ? `You already claimed this ticket. Use ${SETTINGS.prefix}unclaim when you are done.` : `Already claimed by <@${state.claimerId}>.`);
-        state.claimerId = message.author.id; await message.channel.setTopic(topicFor(state));
-        await applyStaffTypingPolicy(message.channel, state);
-        await message.channel.permissionOverwrites.edit(state.ownerId, { ViewChannel: true, ReadMessageHistory: true, SendMessages: true });
-        await message.channel.permissionOverwrites.edit(message.author.id, { ViewChannel: true, ReadMessageHistory: true, SendMessages: true });
+        state.claimerId = message.author.id;
+        await saveClaimState(message.channel, state);
         await message.channel.send(ticketPayload(claimStatusContainer(true, message.author.id), [], {
             allowedMentions: { users: [message.author.id] },
         }));
@@ -481,17 +498,15 @@ const prefixCommands = [
         if (!state.claimerId) return message.reply('This ticket is not currently claimed.');
         if (state.claimerId !== message.author.id && !isSupportAdmin(message.member)) return message.reply('Only the current claimer or a Support Admin can unclaim this ticket.');
         const previousClaimerId = state.claimerId;
-        state.claimerId = null; await message.channel.setTopic(topicFor(state));
-        await applyStaffTypingPolicy(message.channel, state);
-        await message.channel.permissionOverwrites.edit(state.ownerId, { ViewChannel: true, ReadMessageHistory: true, SendMessages: true });
-        if (previousClaimerId && previousClaimerId !== state.ownerId) await message.channel.permissionOverwrites.delete(previousClaimerId).catch(() => null);
+        state.claimerId = null;
+        await saveClaimState(message.channel, state, previousClaimerId);
         await message.channel.send(ticketPayload(claimStatusContainer(false, message.author.id), [], {
             allowedMentions: { users: [message.author.id] },
         }));
     } },
     { name: 'close', execute: async (message, args = []) => {
         const state = getPrefixTicket(message); if (!state) return;
-        if (!canUseSupportButtons(message.member)) return message.reply('Only the Support Team or Support Admin can use this command.');
+        if (!canUseSupportButtons(message.member, state)) return message.reply('Only this ticket’s department team or Support Admin can use this command.');
         if (state.claimerId) return message.reply(`This command only closes unclaimed tickets. This ticket is claimed by <@${state.claimerId}>.`);
 
         const channel = message.channel;
