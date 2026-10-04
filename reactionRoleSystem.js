@@ -16,14 +16,14 @@ const SELECT_ID = 'maui:notification-roles';
 
 // Edit role names, descriptions, emojis, and IDs here.
 const ROLES = [
-    { key: 'chat', id: '1472059287273734228', label: 'Chat Revive', emoji: '💬', description: 'Get notified when the community needs a chat revive.' },
-    { key: 'promo', id: '1472059319481532436', label: 'Promotion Notifications', emoji: '📈', description: 'Get notified about promotions and ranking opportunities.' },
-    { key: 'session', id: '1472059583894655058', label: 'Session Notifications', emoji: '🎮', description: 'Get notified about upcoming sessions, trainings, and in-game activities.' },
-    { key: 'engage', id: '1472059532216893565', label: 'Engagement Notifications', emoji: '🤝', description: 'Get notified about community activities and engagement opportunities.' },
-    { key: 'dev', id: '1472059394089947146', label: 'Development Notifications', emoji: '🛠️', description: 'Get notified about game updates, development progress, and new features.' },
-    { key: 'aware', id: '1484717225276342342', label: 'Awareness Notifications', emoji: '📢', description: 'Get notified about important notices, reminders, and community-wide updates.' },
-    { key: 'events', id: '1484920890029244526', label: 'Events Notifications', emoji: '🎉', description: 'Get notified about upcoming events, celebrations, and activities.' },
-    { key: 'affiliates', id: '1485974696427126854', label: 'Affiliate Notifications', emoji: '🌐', description: 'Get notified about affiliate updates, partnerships, and related announcements.' },
+    { key: 'chat', id: '1472059287273734228', label: 'Chat Revive', emoji: '<:announcement_m:1556061087106080778>', description: 'Get notified when the community needs a chat revive.' },
+    { key: 'promo', id: '1472059319481532436', label: 'Promotion Notifications', emoji: '<:announcement_m:1556061087106080778>', description: 'Get notified about promotions and ranking opportunities.' },
+    { key: 'session', id: '1472059583894655058', label: 'Session Notifications', emoji: '<:announcement_m:1556061087106080778>', description: 'Get notified about upcoming sessions, trainings, and in-game activities.' },
+    { key: 'engage', id: '1472059532216893565', label: 'Engagement Notifications', emoji: '<:announcement_m:1556061087106080778>', description: 'Get notified about community activities and engagement opportunities.' },
+    { key: 'dev', id: '1472059394089947146', label: 'Development Notifications', emoji: '<:announcement_m:1556061087106080778>', description: 'Get notified about game updates, development progress, and new features.' },
+    { key: 'aware', id: '1484717225276342342', label: 'Awareness Notifications', emoji: '<:announcement_m:1556061087106080778>', description: 'Get notified about important notices, reminders, and community-wide updates.' },
+    { key: 'events', id: '1484920890029244526', label: 'Events Notifications', emoji: '<:announcement_m:1556061087106080778>', description: 'Get notified about upcoming events, celebrations, and activities.' },
+    { key: 'affiliates', id: '1485974696427126854', label: 'Affiliate Notifications', emoji: '<:announcement_m:1556061087106080778>', description: 'Get notified about affiliate updates, partnerships, and related announcements.' },
 ];
 
 function addText(container, content) {
