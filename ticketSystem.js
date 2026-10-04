@@ -103,6 +103,11 @@ function topicFor(state) {
 
 function categoryFor(key) { return SETTINGS.categories.find(category => category.key === key); }
 
+function ticketStaffRoleId(state) {
+    const category = state && categoryFor(state.categoryKey);
+    return isId(category?.pingRoleId) ? category.pingRoleId : SETTINGS.supportTeamRoleId;
+}
+
 function isSupportAdmin(member) {
     return member?.permissions?.has(PermissionFlagsBits.Administrator) ||
         (isId(SETTINGS.supportAdminRoleId) && member?.roles?.cache?.has(SETTINGS.supportAdminRoleId));
@@ -120,20 +125,25 @@ function canUseSupportButtons(member) {
 }
 
 async function applyStaffTypingPolicy(channel, state) {
-    const category = categoryFor(state.categoryKey);
     const adminRoleId = SETTINGS.supportAdminRoleId;
-    const staffRoleIds = new Set([SETTINGS.supportTeamRoleId, adminRoleId, category?.pingRoleId].filter(isId));
-    // Everyone else stays read-only; explicit opener, claimer, and Support Admin grants override this.
+    const ticketRoleId = ticketStaffRoleId(state);
+    const staffRoleIds = new Set([
+        SETTINGS.supportTeamRoleId,
+        adminRoleId,
+        ...SETTINGS.categories.map(category => category.pingRoleId),
+    ].filter(isId));
+    // Keep each ticket limited to its department role and Support Admins.
     await channel.permissionOverwrites.edit(channel.guild.roles.everyone.id, {
         ViewChannel: false,
         ReadMessageHistory: false,
         SendMessages: false,
     });
     for (const roleId of staffRoleIds) {
-        const canChat = roleId === adminRoleId || (!state.claimerId && roleId === SETTINGS.supportTeamRoleId);
+        const canView = roleId === adminRoleId || roleId === ticketRoleId;
+        const canChat = roleId === adminRoleId || (!state.claimerId && roleId === ticketRoleId);
         await channel.permissionOverwrites.edit(roleId, {
-            ViewChannel: true,
-            ReadMessageHistory: true,
+            ViewChannel: canView,
+            ReadMessageHistory: canView,
             SendMessages: canChat,
         });
     }
@@ -226,15 +236,24 @@ async function openTicket(interaction, category, answers) {
         .filter(Boolean).map(match => Number(match[1]));
     const number = Math.max(0, ...existingNumbers) + 1;
     const state = { ownerId: interaction.user.id, categoryKey: category.key, claimerId: null, openedAt: Date.now() };
-    const staffRoles = new Set([SETTINGS.supportTeamRoleId, SETTINGS.supportAdminRoleId, category.pingRoleId].filter(isId));
+    const ticketRoleId = isId(category.pingRoleId) ? category.pingRoleId : SETTINGS.supportTeamRoleId;
+    const staffRoles = new Set([
+        SETTINGS.supportTeamRoleId,
+        SETTINGS.supportAdminRoleId,
+        ...SETTINGS.categories.map(item => item.pingRoleId),
+    ].filter(isId));
     const overwrites = [
         { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.SendMessages] },
         { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.AttachFiles, PermissionFlagsBits.EmbedLinks] },
         ...[...staffRoles].map(id => {
-            const allow = [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory];
-            const canChat = id === SETTINGS.supportAdminRoleId || id === SETTINGS.supportTeamRoleId;
-            if (canChat) allow.push(PermissionFlagsBits.SendMessages);
-            return { id, allow, ...(!canChat ? { deny: [PermissionFlagsBits.SendMessages] } : {}) };
+            const canView = id === SETTINGS.supportAdminRoleId || id === ticketRoleId;
+            const canChat = id === SETTINGS.supportAdminRoleId || id === ticketRoleId;
+            return {
+                id,
+                ...(canView
+                    ? { allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory, ...(canChat ? [PermissionFlagsBits.SendMessages] : [])] }
+                    : { deny: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.SendMessages] }),
+            };
         }),
     ];
     if (guild.members.me) overwrites.push({ id: guild.members.me.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels, PermissionFlagsBits.AttachFiles] });
@@ -508,10 +527,26 @@ const prefixCommands = [
         await message.reply('Ticket closed. The transcript was saved, and this channel will be deleted in 5 seconds.');
         setTimeout(() => channel.delete(`Ticket closed by ${message.author.tag}: ${reason}`).catch(() => null), 5000);
     } },
-    { name: 'rename', execute: async (message, args) => {
+    { name: 'rename', execute: async (message, args = []) => {
         const state = getPrefixTicket(message); if (!state || !await staffOnly(message)) return;
-        if (!args.length) return message.reply(`Usage: ${SETTINGS.prefix}rename new-ticket-name`);
-        await message.channel.setName(`ticket-${slug(args.join('-'))}`.slice(0, 100)); await message.reply(`Renamed to **${message.channel.name}**.`);
+        const requestedName = args.join(' ').trim();
+        if (!requestedName) return message.reply(`Usage: ${SETTINGS.prefix}rename new-ticket-name`);
+
+        const nextName = `ticket-${slug(requestedName)}`.slice(0, 100);
+        if (message.channel.name === nextName) return message.reply(`This ticket is already named **${nextName}**.`);
+
+        try {
+            await message.channel.setName(nextName, `Ticket renamed by ${message.author.tag}`);
+        } catch (error) {
+            console.error(`Could not rename ticket ${message.channel.id}:`, error);
+            const reason = error.code === 50013
+                ? 'The bot needs Manage Channels permission in this ticket.'
+                : error.code === 429
+                    ? 'Discord is rate limiting channel renames. Please wait a little and try again.'
+                    : `Discord rejected the rename: ${error.message}`;
+            return message.reply(`Could not rename this ticket. ${reason}`);
+        }
+        return message.reply(`Renamed to **${message.channel.name}**.`);
     } },
     { name: 'escalate', execute: async (message, args) => {
         const state = getPrefixTicket(message); if (!state || !await staffOnly(message)) return;
