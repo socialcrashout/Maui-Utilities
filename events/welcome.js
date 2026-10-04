@@ -39,7 +39,7 @@ module.exports = {
                         `## 🌴 **Your journey starts here**`,
                         `• Take a moment to explore our **<#1471165462099394721>** channels and learn more about Maui.`,
                         `• Customize your experience by checking out **<id:customize>** and selecting the roles you'd like.`,
-                        `• Stay in the loop with our latest announcements, updates, and information through **<#1471166873675632641>**.`,
+                        `• Stay in the loop with our latest announcements, updates, and information through **<#1556059223798845460>**.`,
                         `• Most importantly, have fun, get involved, and enjoy everything Maui has to offer!`,
                     ].join('\n')
                 )
