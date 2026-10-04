@@ -1,5 +1,6 @@
 // Ticket system settings and copy live here so they are easy to customize.
 // Add Discord role/channel IDs below before using the system.
+const { getDB } = require('./db'); // adjust the path if db.js lives elsewhere
 const {
     ActionRowBuilder,
     ButtonBuilder,
@@ -16,6 +17,7 @@ const {
     TextInputBuilder,
     TextInputStyle,
     Events,
+    Routes,
     AttachmentBuilder,
     FileBuilder,
     MediaGalleryBuilder,
@@ -74,6 +76,59 @@ const isId = value => /^\d{17,20}$/.test(String(value || ''));
 const safeText = (value, max = 1000) => String(value || '').replace(/[<>]/g, '').slice(0, max) || 'Not provided';
 const slug = value => String(value || '').toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 80) || 'ticket';
 
+// ---------------------------------------------------------------------------
+// Ticket state store (memory cache + MongoDB 'tickets' collection).
+// State used to live in the channel topic, but every topic edit is a channel
+// PATCH that shares Discord's rate-limit bucket with renames. That is why
+// -claim froze after -rename. Claiming is now instant and never edits the channel.
+// ---------------------------------------------------------------------------
+const tickets = new Map(); // channelId -> state (cache; MongoDB is the source of truth)
+const col = () => getDB().collection('tickets');
+
+let loadPromise = null;
+// Loads open tickets from MongoDB once. Safe to call repeatedly; retries if the DB wasn't ready.
+function loadTickets() {
+    if (!loadPromise) {
+        loadPromise = col().find({}).toArray()
+            .then(docs => { for (const { _id, ...state } of docs) tickets.set(_id, state); })
+            .catch(error => { console.error('Could not load tickets from MongoDB:', error.message); loadPromise = null; });
+    }
+    return loadPromise;
+}
+
+// Fire-and-forget so claim/unclaim never wait on the database.
+function saveTicket(channelId, state) {
+    col().replaceOne({ _id: channelId }, { ...state }, { upsert: true })
+        .catch(error => console.error(`Could not save ticket ${channelId}:`, error.message));
+}
+function deleteTicket(channelId) {
+    tickets.delete(channelId);
+    col().deleteOne({ _id: channelId })
+        .catch(error => console.error(`Could not delete ticket ${channelId}:`, error.message));
+}
+
+function stateFromChannel(channel) {
+    if (!channel) return null;
+    const cached = tickets.get(channel.id);
+    if (cached) return cached;
+    // Fallback for tickets created before this update (state stored in topic).
+    const match = String(channel.topic || '').match(/^maui-ticket\|([^|]+)\|([^|]+)\|([^|]*)\|([^|]+)$/);
+    if (!match) return null;
+    const state = { ownerId: match[1], categoryKey: match[2], claimerId: match[3] || null, openedAt: Number(match[4]) || Date.now() };
+    tickets.set(channel.id, state);
+    saveTicket(channel.id, state);
+    return state;
+}
+
+function topicFor(state) {
+    return `${TICKET_PREFIX}|${state.ownerId}|${state.categoryKey}|${state.claimerId || ''}|${state.openedAt}`.slice(0, 1024);
+}
+
+function categoryFor(key) { return SETTINGS.categories.find(category => category.key === key); }
+
+// ---------------------------------------------------------------------------
+// UI builders
+// ---------------------------------------------------------------------------
 function ticketContainer(title, lines, includeBanner = false) {
     const box = new ContainerBuilder();
     if (includeBanner && SETTINGS.bannerUrl) {
@@ -91,18 +146,77 @@ function ticketPayload(container, components = [], extra = {}) {
     return { flags: MessageFlags.IsComponentsV2, components: [container], ...extra };
 }
 
-function stateFromChannel(channel) {
-    const match = String(channel.topic || '').match(/^maui-ticket\|([^|]+)\|([^|]+)\|([^|]*)\|([^|]+)$/);
-    if (!match) return null;
-    return { ownerId: match[1], categoryKey: match[2], claimerId: match[3] || null, openedAt: Number(match[4]) || Date.now() };
+function ticketButtons() {
+    return new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('maui:ticket:claim').setLabel(SETTINGS.buttons.claim).setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId('maui:ticket:unclaim').setLabel(SETTINGS.buttons.unclaim).setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('maui:ticket:rename').setLabel(SETTINGS.buttons.rename).setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('maui:ticket:escalate').setLabel(SETTINGS.buttons.escalate).setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('maui:ticket:close').setLabel(SETTINGS.buttons.close).setStyle(ButtonStyle.Danger),
+    );
 }
 
-function topicFor(state) {
-    return `${TICKET_PREFIX}|${state.ownerId}|${state.categoryKey}|${state.claimerId || ''}|${state.openedAt}`.slice(0, 1024);
+// The main ticket message. Rebuilt from state so "Claimed by" stays accurate.
+function openTicketContainer(state) {
+    const category = categoryFor(state.categoryKey);
+    const pingRoleIds = [...new Set([category?.pingRoleId || SETTINGS.supportTeamRoleId].filter(isId))];
+    const lines = [
+        [...pingRoleIds.map(roleId => `<@&${roleId}>`), `<@${state.ownerId}>`].join(' '),
+        SETTINGS.ticketWelcome,
+        '',
+        `**Opened by:** <@${state.ownerId}>`,
+        `**Category:** ${category?.label || state.categoryKey}`,
+        `**Why:** ${safeText(state.reason)}`,
+        `**Additional details:** ${safeText(state.details)}`,
+        `**Opened:** <t:${Math.floor(state.openedAt / 1000)}:F>`,
+        `**Claimed by:** ${state.claimerId ? `<@${state.claimerId}>` : 'Unclaimed'}`,
+    ];
+    return ticketContainer(`${category?.emoji || '🎫'} ${SETTINGS.ticketTitle} · ${category?.label || state.categoryKey}`, lines, true);
 }
 
-function categoryFor(key) { return SETTINGS.categories.find(category => category.key === key); }
+async function refreshTicketMessage(channel, state) {
+    if (!state.messageId) return;
+    try {
+        const msg = await channel.messages.fetch(state.messageId);
+        await msg.edit({
+            ...ticketPayload(openTicketContainer(state), [ticketButtons()]),
+            allowedMentions: { parse: [] },
+        });
+    } catch (error) {
+        console.error(`Could not refresh ticket message in ${channel.id}:`, error.message);
+    }
+}
 
+function claimStatusContainer(claimed, userId) {
+    return ticketContainer(claimed ? '🙋 Ticket Claimed' : '↩️ Ticket Unclaimed', [
+        claimed ? `**Claimed by:** <@${userId}>` : `**Unclaimed by:** <@${userId}>`,
+        claimed ? 'The opener and claimer can chat here. Support Admins can also chat; other support roles are view-only.' : 'The opener, Support Team, and Support Admins can chat until someone claims this ticket.',
+    ]);
+}
+
+function escalationContainer(state) {
+    const roleId = SETTINGS.supportAdminRoleId;
+    const pings = [isId(roleId) ? `<@&${roleId}>` : '', `<@${state.ownerId}>`].filter(Boolean).join(' - ');
+    return ticketContainer('<:maui:1556034121271214141> **Ticket Escalated**', [
+        `-# ${pings}`,
+        'This ticket has been **escalated to the Leadership Team** for further assistance. Please remain patient while a member of Leadership reviews your request.',
+        '',
+        'Someone will be with you **shortly** to assist you further. In the meantime, please avoid sending unnecessary messages, as this may delay the review of your ticket.',
+        '',
+        'Thank you for your patience and understanding!',
+    ]);
+}
+
+function escalationMentions(state) {
+    return {
+        roles: isId(SETTINGS.supportAdminRoleId) ? [SETTINGS.supportAdminRoleId] : [],
+        users: [...new Set([state.ownerId].filter(isId))],
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Permissions
+// ---------------------------------------------------------------------------
 function ticketStaffRoleId(state) {
     const category = state && categoryFor(state.categoryKey);
     return isId(category?.pingRoleId) ? category.pingRoleId : SETTINGS.supportTeamRoleId;
@@ -151,17 +265,17 @@ async function applyStaffTypingPolicy(channel, state) {
     await Promise.all(updates);
 }
 
+// Claim/unclaim: state is saved in memory instantly; only permission overwrites
+// are touched on Discord (a separate rate-limit bucket from renames).
 async function saveClaimState(channel, state, previousClaimerId = null) {
-    const ticketRoleId = ticketStaffRoleId(state);
+    saveTicket(channel.id, state);
     const updates = [
-        channel.setTopic(topicFor(state)),
-        channel.permissionOverwrites.edit(ticketRoleId, {
+        channel.permissionOverwrites.edit(ticketStaffRoleId(state), {
             ViewChannel: true,
             ReadMessageHistory: true,
             SendMessages: !state.claimerId,
         }),
     ];
-
     if (state.claimerId) {
         updates.push(channel.permissionOverwrites.edit(state.claimerId, {
             ViewChannel: true,
@@ -171,15 +285,16 @@ async function saveClaimState(channel, state, previousClaimerId = null) {
     } else if (previousClaimerId && previousClaimerId !== state.ownerId) {
         updates.push(channel.permissionOverwrites.delete(previousClaimerId).catch(() => null));
     }
-
     await Promise.all(updates);
 }
 
 async function syncOpenTicketPermissions(client) {
+    await loadTickets();
     for (const guild of client.guilds.cache.values()) {
         for (const channel of guild.channels.cache.values()) {
+            if (channel.type !== ChannelType.GuildText) continue;
             const state = stateFromChannel(channel);
-            if (!state || channel.type !== ChannelType.GuildText) continue;
+            if (!state) continue;
             await applyStaffTypingPolicy(channel, state);
             await channel.permissionOverwrites.edit(state.ownerId, {
                 ViewChannel: true, ReadMessageHistory: true, SendMessages: true,
@@ -193,43 +308,60 @@ async function syncOpenTicketPermissions(client) {
     }
 }
 
-function ticketButtons() {
-    return new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('maui:ticket:claim').setLabel(SETTINGS.buttons.claim).setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId('maui:ticket:unclaim').setLabel(SETTINGS.buttons.unclaim).setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('maui:ticket:rename').setLabel(SETTINGS.buttons.rename).setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('maui:ticket:escalate').setLabel(SETTINGS.buttons.escalate).setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('maui:ticket:close').setLabel(SETTINGS.buttons.close).setStyle(ButtonStyle.Danger),
-    );
-}
-
-function claimStatusContainer(claimed, userId) {
-    return ticketContainer(claimed ? '🙋 Ticket Claimed' : '↩️ Ticket Unclaimed', [
-        claimed ? `**Claimed by:** <@${userId}>` : `**Unclaimed by:** <@${userId}>`,
-        claimed ? 'The opener and claimer can chat here. Support Admins can also chat; other support roles are view-only.' : 'The opener, Support Team, and Support Admins can chat until someone claims this ticket.',
+// Shared by the button/modal and the prefix command.
+async function applyClaim(channel, state, userId, claim) {
+    const previousClaimerId = state.claimerId;
+    state.claimerId = claim ? userId : null;
+    await Promise.all([
+        saveClaimState(channel, state, previousClaimerId),
+        channel.send(ticketPayload(claimStatusContainer(claim, userId), [], { allowedMentions: { users: [userId] } })),
+        refreshTicketMessage(channel, state),
     ]);
 }
 
-function escalationContainer(state) {
-    const roleId = SETTINGS.supportAdminRoleId;
-    const pings = [isId(roleId) ? `<@&${roleId}>` : '', `<@${state.ownerId}>`].filter(Boolean).join(' - ');
-    return ticketContainer('<:maui:1556034121271214141> **Ticket Escalated**', [
-        `-# ${pings}`,
-        'This ticket has been **escalated to the Leadership Team** for further assistance. Please remain patient while a member of Leadership reviews your request.',
-        '',
-        'Someone will be with you **shortly** to assist you further. In the meantime, please avoid sending unnecessary messages, as this may delay the review of your ticket.',
-        '',
-        'Thank you for your patience and understanding!',
-    ]);
+// ---------------------------------------------------------------------------
+// Fast rename. Discord allows 2 renames / 10 min / channel. We track that
+// ourselves and answer immediately instead of letting the request hang, and we
+// abort after 5s if Discord still queues it.
+// ---------------------------------------------------------------------------
+const RENAME_WINDOW = 10 * 60 * 1000;
+const renameLog = new Map(); // channelId -> [timestamps]
+
+function renameWaitSeconds(channelId) {
+    const now = Date.now();
+    const recent = (renameLog.get(channelId) || []).filter(t => now - t < RENAME_WINDOW);
+    renameLog.set(channelId, recent);
+    return recent.length >= 2 ? Math.ceil((RENAME_WINDOW - (now - recent[0])) / 1000) : 0;
 }
 
-function escalationMentions(state) {
-    return {
-        roles: isId(SETTINGS.supportAdminRoleId) ? [SETTINGS.supportAdminRoleId] : [],
-        users: [...new Set([state.ownerId].filter(isId))],
-    };
+async function renameTicket(channel, requestedName, byTag) {
+    const nextName = `ticket-${slug(requestedName)}`.slice(0, 100);
+    if (channel.name === nextName) return { ok: false, text: `This ticket is already named **${nextName}**.` };
+
+    const wait = renameWaitSeconds(channel.id);
+    if (wait) {
+        const mins = Math.floor(wait / 60), secs = wait % 60;
+        return { ok: false, text: `Discord only allows **2 renames per 10 minutes** per channel. Try again in **${mins}m ${secs}s**.` };
+    }
+    try {
+        await channel.client.rest.patch(Routes.channel(channel.id), {
+            body: { name: nextName },
+            reason: `Ticket renamed by ${byTag}`,
+            signal: AbortSignal.timeout(5000),
+        });
+        renameLog.get(channel.id).push(Date.now());
+        return { ok: true, text: `Renamed to **${nextName}**.` };
+    } catch (error) {
+        console.error(`Could not rename ticket ${channel.id}:`, error);
+        if (error.name === 'AbortError' || error.name === 'TimeoutError') return { ok: false, text: 'Discord is rate limiting this channel’s renames right now. Please try again in a few minutes.' };
+        if (error.code === 50013) return { ok: false, text: 'The bot needs **Manage Channels** permission in this ticket.' };
+        return { ok: false, text: `Discord rejected the rename: ${error.message}` };
+    }
 }
 
+// ---------------------------------------------------------------------------
+// Panel / open / claim / close
+// ---------------------------------------------------------------------------
 async function createPanel(message) {
     if (!isId(SETTINGS.supportCategoryId)) return message.reply('Set `supportCategoryId` near the top of `ticketSystem.js` first.');
     const select = new StringSelectMenuBuilder()
@@ -261,7 +393,10 @@ async function openTicket(interaction, category, answers) {
         .map(channel => channel.name.match(/^ticket-(\d+)-/))
         .filter(Boolean).map(match => Number(match[1]));
     const number = Math.max(0, ...existingNumbers) + 1;
-    const state = { ownerId: interaction.user.id, categoryKey: category.key, claimerId: null, openedAt: Date.now() };
+    const state = {
+        ownerId: interaction.user.id, categoryKey: category.key, claimerId: null, openedAt: Date.now(),
+        reason: answers.reason, details: answers.details, messageId: null,
+    };
     const ticketRoleId = isId(category.pingRoleId) ? category.pingRoleId : SETTINGS.supportTeamRoleId;
     const staffRoles = new Set([
         SETTINGS.supportTeamRoleId,
@@ -292,22 +427,14 @@ async function openTicket(interaction, category, answers) {
         permissionOverwrites: overwrites,
         reason: `Ticket opened by ${interaction.user.tag} (${category.label})`,
     });
+    tickets.set(channel.id, state);
+    saveTicket(channel.id, state);
     const pingRoleIds = [...new Set([category.pingRoleId || SETTINGS.supportTeamRoleId].filter(isId))];
-    const content = [...pingRoleIds.map(roleId => `<@&${roleId}>`), `<@${interaction.user.id}>`].join(' ');
-    const lines = [
-        content,
-        SETTINGS.ticketWelcome,
-        '',
-        `**Opened by:** <@${interaction.user.id}>`,
-        `**Category:** ${category.label}`,
-        `**Why:** ${safeText(answers.reason)}`,
-        `**Additional details:** ${safeText(answers.details)}`,
-        `**Opened:** <t:${Math.floor(state.openedAt / 1000)}:F>`,
-        `**Claimed by:** Unclaimed`,
-    ];
-    await channel.send(ticketPayload(ticketContainer(`${category.emoji} ${SETTINGS.ticketTitle} · ${category.label}`, lines, true), [ticketButtons()], {
+    const sent = await channel.send(ticketPayload(openTicketContainer(state), [ticketButtons()], {
         allowedMentions: { users: [interaction.user.id], roles: pingRoleIds },
     }));
+    state.messageId = sent.id;
+    saveTicket(channel.id, state);
     await interaction.editReply({ content: `Your ticket is ready: ${channel}` });
 }
 
@@ -332,12 +459,7 @@ async function updateClaim(interaction, channel, state, claim) {
         return interaction.reply({ content: 'Only the person who claimed this ticket or a Support Admin can unclaim it.', flags: MessageFlags.Ephemeral });
     }
     await interaction.deferUpdate();
-    const previousClaimerId = state.claimerId;
-    state.claimerId = claim ? interaction.user.id : null;
-    await saveClaimState(channel, state, previousClaimerId);
-    await channel.send(ticketPayload(claimStatusContainer(claim, interaction.user.id), [], {
-        allowedMentions: { users: [interaction.user.id] },
-    }));
+    await applyClaim(channel, state, interaction.user.id, claim);
 }
 
 async function transcriptHtml(channel, state, category, reason) {
@@ -361,43 +483,55 @@ async function transcriptHtml(channel, state, category, reason) {
         const text = [message.content, ...componentText].filter(Boolean).join('\n') || '[No text]';
         return `<article><b>${esc(message.author.tag)}</b> <time>${new Date(message.createdTimestamp).toISOString()}</time><p>${esc(text)}</p>${message.attachments.map(file => `<p><a href="${esc(file.url)}">${esc(file.name || 'attachment')}</a></p>`).join('')}</article>`;
     }).join('\n');
-    const opener = await channel.guild.members.fetch(state.ownerId).catch(() => null);
-    const claimer = state.claimerId ? await channel.guild.members.fetch(state.claimerId).catch(() => null) : null;
+    const [opener, claimer] = await Promise.all([
+        channel.guild.members.fetch(state.ownerId).catch(() => null),
+        state.claimerId ? channel.guild.members.fetch(state.claimerId).catch(() => null) : null,
+    ]);
     const html = `<!doctype html><html><head><meta charset="utf-8"><title>${esc(SETTINGS.transcriptTitle)}</title><style>body{font:15px system-ui;background:#111;color:#eee;max-width:900px;margin:40px auto;padding:0 20px}article{padding:14px 0;border-bottom:1px solid #333}time{color:#999;font-size:12px}p{white-space:pre-wrap}</style></head><body><h1>${esc(SETTINGS.transcriptTitle)} · ${esc(channel.name)}</h1><p>Opened by: ${esc(opener?.user.tag || state.ownerId)}<br>Category: ${esc(category?.label || state.categoryKey)}<br>Claimed by: ${esc(claimer?.user.tag || 'Unclaimed')}<br>Opened: ${new Date(state.openedAt).toISOString()}<br>Closed: ${new Date().toISOString()}<br>Closing reason: ${esc(reason)}</p><hr>${body}</body></html>`;
     return new AttachmentBuilder(Buffer.from(html, 'utf8'), { name: `${channel.name}-transcript.html`, description: 'Ticket conversation transcript' });
+}
+
+// Shared close logic for the button and -close. Returns true if the channel will be deleted.
+async function finishClose(guild, channel, state, closedById, closedByTag, reason) {
+    const category = categoryFor(state.categoryKey);
+    const file = await transcriptHtml(channel, state, category, reason);
+    const logChannel = isId(SETTINGS.transcriptChannelId)
+        ? await guild.channels.fetch(SETTINGS.transcriptChannelId).catch(() => null)
+        : null;
+    const transcriptTarget = logChannel?.isTextBased() ? logChannel : channel;
+    const summary = ticketContainer(SETTINGS.transcriptTitle, [
+        `**Ticket:** ${channel.name}`, `**Opened by:** <@${state.ownerId}>`,
+        `**Category:** ${category?.label || state.categoryKey}`, `**Claimed by:** ${state.claimerId ? `<@${state.claimerId}>` : 'Unclaimed'}`,
+        `**Opened:** <t:${Math.floor(state.openedAt / 1000)}:F>`, `**Closed by:** <@${closedById}>`, `**Closing reason:** ${safeText(reason)}`,
+        `Transcript attached: **${channel.name}-transcript.html**`,
+    ]);
+    summary.addFileComponents(new FileBuilder().setURL(`attachment://${file.name}`));
+    await transcriptTarget.send(ticketPayload(summary, [], {
+        files: [file],
+        allowedMentions: { users: [...new Set([state.ownerId, state.claimerId, closedById].filter(isId))] },
+    }));
+
+    deleteTicket(channel.id);
+
+    if (transcriptTarget === channel) {
+        await Promise.all([
+            channel.setName(`closed-${channel.name}`.slice(0, 100)).catch(() => null),
+            channel.permissionOverwrites.edit(state.ownerId, { ViewChannel: false, SendMessages: false }).catch(() => null),
+            channel.setTopic(`maui-closed|${state.ownerId}|${state.categoryKey}|${state.claimerId || ''}|${state.openedAt}`.slice(0, 1024)).catch(() => null),
+        ]);
+        return false;
+    }
+    setTimeout(() => channel.delete(`Ticket closed by ${closedByTag}: ${reason}`).catch(() => null), 5000);
+    return true;
 }
 
 async function closeTicket(interaction, channel, state, reason) {
     if (!canManage(interaction.member, state) && state.ownerId !== interaction.user.id) return interaction.reply({ content: 'Only the ticket opener, its department team, or Support Admin can close this ticket.', flags: MessageFlags.Ephemeral });
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-    const category = categoryFor(state.categoryKey);
-    const file = await transcriptHtml(channel, state, category, reason);
-    const logChannel = isId(SETTINGS.transcriptChannelId)
-        ? await interaction.guild.channels.fetch(SETTINGS.transcriptChannelId).catch(() => null)
-        : null;
-    const transcriptTarget = logChannel?.isTextBased() ? logChannel : channel;
-    {
-        const summary = ticketContainer(SETTINGS.transcriptTitle, [
-                `**Ticket:** ${channel.name}`, `**Opened by:** <@${state.ownerId}>`,
-                `**Category:** ${category?.label || state.categoryKey}`, `**Claimed by:** ${state.claimerId ? `<@${state.claimerId}>` : 'Unclaimed'}`,
-                `**Opened:** <t:${Math.floor(state.openedAt / 1000)}:F>`, `**Closed by:** <@${interaction.user.id}>`, `**Closing reason:** ${safeText(reason)}`,
-                `Transcript attached: **${channel.name}-transcript.html**`,
-            ]);
-        summary.addFileComponents(new FileBuilder().setURL(`attachment://${file.name}`));
-        await transcriptTarget.send(ticketPayload(summary, [], {
-            files: [file],
-            allowedMentions: { users: [...new Set([state.ownerId, state.claimerId, interaction.user.id].filter(isId))] },
-        }));
-    }
-    if (transcriptTarget === channel) {
-        await interaction.editReply({ content: 'Transcript saved in this ticket. It will be archived in place because no transcript log channel is configured.' });
-        await channel.setName(`closed-${channel.name}`.slice(0, 100)).catch(() => null);
-        await channel.permissionOverwrites.edit(state.ownerId, { ViewChannel: false, SendMessages: false }).catch(() => null);
-        await channel.setTopic(`maui-closed|${state.ownerId}|${state.categoryKey}|${state.claimerId || ''}|${state.openedAt}`.slice(0, 1024)).catch(() => null);
-        return;
-    }
-    await interaction.editReply({ content: 'Transcript saved. This ticket will close in 5 seconds.' });
-    setTimeout(() => channel.delete(`Ticket closed by ${interaction.user.tag}: ${reason}`).catch(() => null), 5000);
+    const deleting = await finishClose(interaction.guild, channel, state, interaction.user.id, interaction.user.tag, reason);
+    await interaction.editReply({ content: deleting
+        ? 'Transcript saved. This ticket will close in 5 seconds.'
+        : 'Transcript saved in this ticket. It was archived in place because no transcript log channel is configured.' });
 }
 
 async function showActionModal(interaction, action) {
@@ -411,6 +545,7 @@ async function showActionModal(interaction, action) {
 }
 
 async function handleInteraction(interaction) {
+    await loadTickets();
     if (interaction.isStringSelectMenu() && interaction.customId === 'maui:ticket:category') {
         const category = categoryFor(interaction.values[0]);
         if (!category) return interaction.reply({ content: 'That ticket category is unavailable.', flags: MessageFlags.Ephemeral });
@@ -449,16 +584,18 @@ async function handleInteraction(interaction) {
         if (!state) return interaction.reply({ content: 'This ticket is no longer open.', flags: MessageFlags.Ephemeral });
         if (action === 'rename') {
             if (!canUseSupportButtons(interaction.member, state)) return interaction.reply({ content: 'Only this ticket’s department team or Support Admin can rename it.', flags: MessageFlags.Ephemeral });
-            const base = slug(interaction.fields.getTextInputValue('ticket_name'));
             await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-            await channel.setName(`ticket-${base}`.slice(0, 100));
-            return interaction.editReply({ content: `Ticket renamed to **${channel.name}**.` });
+            const result = await renameTicket(channel, interaction.fields.getTextInputValue('ticket_name'), interaction.user.tag);
+            return interaction.editReply({ content: result.text });
         }
         if (action === 'close') return closeTicket(interaction, channel, state, interaction.fields.getTextInputValue(SETTINGS.closeQuestion.id));
     }
     return false;
 }
 
+// ---------------------------------------------------------------------------
+// Prefix commands
+// ---------------------------------------------------------------------------
 const staffOnly = async message => {
     if (!canManage(message.member)) { await message.reply('Only the support team can use ticket staff commands.'); return false; }
     return true;
@@ -487,93 +624,29 @@ const prefixCommands = [
     { name: 'claim', execute: async message => {
         const state = getPrefixTicket(message); if (!state || !await staffOnly(message)) return;
         if (state.claimerId) return message.reply(state.claimerId === message.author.id ? `You already claimed this ticket. Use ${SETTINGS.prefix}unclaim when you are done.` : `Already claimed by <@${state.claimerId}>.`);
-        state.claimerId = message.author.id;
-        await saveClaimState(message.channel, state);
-        await message.channel.send(ticketPayload(claimStatusContainer(true, message.author.id), [], {
-            allowedMentions: { users: [message.author.id] },
-        }));
+        await applyClaim(message.channel, state, message.author.id, true);
     } },
     { name: 'unclaim', execute: async message => {
         const state = getPrefixTicket(message); if (!state || !await staffOnly(message)) return;
         if (!state.claimerId) return message.reply('This ticket is not currently claimed.');
         if (state.claimerId !== message.author.id && !isSupportAdmin(message.member)) return message.reply('Only the current claimer or a Support Admin can unclaim this ticket.');
-        const previousClaimerId = state.claimerId;
-        state.claimerId = null;
-        await saveClaimState(message.channel, state, previousClaimerId);
-        await message.channel.send(ticketPayload(claimStatusContainer(false, message.author.id), [], {
-            allowedMentions: { users: [message.author.id] },
-        }));
+        await applyClaim(message.channel, state, message.author.id, false);
     } },
     { name: 'close', execute: async (message, args = []) => {
         const state = getPrefixTicket(message); if (!state) return;
         if (!canUseSupportButtons(message.member, state)) return message.reply('Only this ticket’s department team or Support Admin can use this command.');
         if (state.claimerId) return message.reply(`This command only closes unclaimed tickets. This ticket is claimed by <@${state.claimerId}>.`);
-
-        const channel = message.channel;
         const reason = safeText(args.join(' ') || 'Closed by support staff using -close');
-        const category = categoryFor(state.categoryKey);
-        const file = await transcriptHtml(channel, state, category, reason);
-        const logChannel = isId(SETTINGS.transcriptChannelId)
-            ? await message.guild.channels.fetch(SETTINGS.transcriptChannelId).catch(() => null)
-            : null;
-        const transcriptTarget = logChannel?.isTextBased() ? logChannel : channel;
-        const summary = ticketContainer(SETTINGS.transcriptTitle, [
-            `**Ticket:** ${channel.name}`,
-            `**Opened by:** <@${state.ownerId}>`,
-            `**Category:** ${category?.label || state.categoryKey}`,
-            '**Claimed by:** Unclaimed',
-            `**Opened:** <t:${Math.floor(state.openedAt / 1000)}:F>`,
-            `**Closed by:** <@${message.author.id}>`,
-            `**Closing reason:** ${reason}`,
-            `Transcript attached: **${channel.name}-transcript.html**`,
-        ]);
-        summary.addFileComponents(new FileBuilder().setURL(`attachment://${file.name}`));
-        await transcriptTarget.send(ticketPayload(summary, [], {
-            files: [file],
-            allowedMentions: { users: [state.ownerId, message.author.id] },
-        }));
-
-        if (transcriptTarget === channel) {
-            await channel.setName(`closed-${channel.name}`.slice(0, 100)).catch(() => null);
-            await channel.permissionOverwrites.edit(state.ownerId, { ViewChannel: false, SendMessages: false }).catch(() => null);
-            await channel.setTopic(`maui-closed|${state.ownerId}|${state.categoryKey}||${state.openedAt}`.slice(0, 1024)).catch(() => null);
-            return message.reply('Ticket closed and transcript saved in this channel.');
-        }
-        await message.reply('Ticket closed. The transcript was saved, and this channel will be deleted in 5 seconds.');
-        setTimeout(() => channel.delete(`Ticket closed by ${message.author.tag}: ${reason}`).catch(() => null), 5000);
+        const deleting = await finishClose(message.guild, message.channel, state, message.author.id, message.author.tag, reason);
+        if (deleting) return message.reply('Ticket closed. The transcript was saved, and this channel will be deleted in 5 seconds.');
+        return message.reply('Ticket closed and transcript saved in this channel.');
     } },
     { name: 'rename', execute: async (message, args = []) => {
         const state = getPrefixTicket(message); if (!state || !await staffOnly(message)) return;
         const requestedName = args.join(' ').trim();
         if (!requestedName) return message.channel.send(`Usage: ${SETTINGS.prefix}rename new-ticket-name`);
-
-        const nextName = `ticket-${slug(requestedName)}`.slice(0, 100);
-        if (message.channel.name === nextName) return message.channel.send(`This ticket is already named **${nextName}**.`);
-
-        // A prefix command cannot be deferred like a slash command, so acknowledge
-        // it immediately while Discord processes the channel rename.
-        const renameResult = message.channel.setName(nextName, `Ticket renamed by ${message.author.tag}`)
-            .then(() => null, error => error);
-        let statusMessage;
-        try {
-            statusMessage = await message.channel.send(`Renaming ticket to **${nextName}**…`);
-        } catch (error) {
-            console.error(`Could not acknowledge rename for ticket ${message.channel.id}:`, error);
-            await renameResult;
-            return;
-        }
-
-        const error = await renameResult;
-        if (error) {
-            console.error(`Could not rename ticket ${message.channel.id}:`, error);
-            const reason = error.code === 50013
-                ? 'The bot needs Manage Channels permission in this ticket.'
-                : error.code === 429
-                    ? 'Discord is rate limiting channel renames. Please wait a little and try again.'
-                    : `Discord rejected the rename: ${error.message}`;
-            return statusMessage.edit(`Could not rename this ticket. ${reason}`).catch(console.error);
-        }
-        return statusMessage.edit(`Renamed to **${message.channel.name}**.`).catch(console.error);
+        const result = await renameTicket(message.channel, requestedName, message.author.tag);
+        return message.channel.send(result.text);
     } },
     { name: 'escalate', execute: async (message, args) => {
         const state = getPrefixTicket(message); if (!state || !await staffOnly(message)) return;
@@ -584,7 +657,10 @@ const prefixCommands = [
 ];
 
 module.exports = {
-    prefixCommands,
+    prefixCommands: prefixCommands.map(command => ({
+        ...command,
+        execute: async (...args) => { await loadTickets(); return command.execute(...args); },
+    })),
     handleInteraction,
     syncOpenTicketPermissions,
     settings: SETTINGS,
