@@ -127,7 +127,10 @@ async function handleInteraction(interaction) {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral | MessageFlags.IsComponentsV2 });
 
     const chosen = interaction.values.map(key => ROLES.find(role => role.key === key)).filter(Boolean);
-    const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+    // Refresh role state before deciding whether each selected role should be
+    // added or removed. A cached GuildMember can otherwise make the next menu
+    // submission act on stale membership data.
+    const member = await interaction.guild.members.fetch({ user: interaction.user.id, force: true }).catch(() => null);
     const botMember = interaction.guild.members.me || await interaction.guild.members.fetchMe().catch(() => null);
     if (!member || !botMember?.permissions.has(PermissionFlagsBits.ManageRoles)) {
         return interaction.editReply(ephemeralStatus('❌ Could not update roles', 'The bot needs the Manage Roles permission to manage notification roles.'));

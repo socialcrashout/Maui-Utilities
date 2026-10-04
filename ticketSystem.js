@@ -59,11 +59,11 @@ Please select the **most appropriate category** from the dropdown below. Selecti
     ],
     closeQuestion: { id: 'close_reason', label: 'Closing reason', placeholder: 'Briefly explain why this ticket is closing', required: true },
     categories: [
-        { key: 'general', label: 'General Support', description: 'Questions, help, or general assistance.', emoji: '💬', pingRoleId: '' },
-        { key: 'leadership', label: 'Leadership Support', description: 'Private matters for the leadership team.', emoji: '🛡️', pingRoleId: '' },
-        { key: 'hr', label: 'Human Resources Support', description: 'Staff-related concerns, management matters, reports, leave requests, and HR inquiries.', emoji: '👥', pingRoleId: '' },
+        { key: 'general', label: 'General Support', description: 'Questions, help, or general assistance.', emoji: '💬', pingRoleId: '1484374350089027585' },
+        { key: 'leadership', label: 'Leadership Support', description: 'Private matters for the leadership team.', emoji: '🛡️', pingRoleId: '1471629811221794827' },
+        { key: 'hr', label: 'Human Resources Support', description: 'Staff-related concerns, management matters, reports, leave requests, and HR inquiries.', emoji: '👥', pingRoleId: '1484374059079958758' },
         { key: 'dev', label: 'Development Support', description: 'Development questions, game issues, bugs, and suggestions.', emoji: '🛠️', pingRoleId: '' },
-        { key: 'prd', label: 'Public Relations Department Support', description: 'Partnership inquiries, affiliate matters, and public relations concerns.', emoji: '📋', pingRoleId: '' },
+        { key: 'prd', label: 'Public Relations Department Support', description: 'Partnership inquiries, affiliate matters, and public relations concerns.', emoji: '📋', pingRoleId: '1484374236243038351' },
     ],
     // Change labels and emoji freely. Button ids are internal and should stay as-is.
     buttons: { claim: 'Claim', unclaim: 'Unclaim', rename: 'Rename', escalate: 'Escalate', close: 'Close' },
@@ -130,10 +130,11 @@ async function applyStaffTypingPolicy(channel, state) {
         SendMessages: false,
     });
     for (const roleId of staffRoleIds) {
+        const canChat = roleId === adminRoleId || (!state.claimerId && roleId === SETTINGS.supportTeamRoleId);
         await channel.permissionOverwrites.edit(roleId, {
             ViewChannel: true,
             ReadMessageHistory: true,
-            SendMessages: roleId === adminRoleId ? true : null,
+            SendMessages: canChat,
         });
     }
 }
@@ -169,7 +170,7 @@ function ticketButtons() {
 function claimStatusContainer(claimed, userId) {
     return ticketContainer(claimed ? '🙋 Ticket Claimed' : '↩️ Ticket Unclaimed', [
         claimed ? `**Claimed by:** <@${userId}>` : `**Unclaimed by:** <@${userId}>`,
-        claimed ? 'The ticket opener and assigned claimer can chat here. Other support roles can view the ticket.' : 'The ticket opener can continue chatting. Support roles remain view-only until someone claims it.',
+        claimed ? 'The opener and claimer can chat here. Support Admins can also chat; other support roles are view-only.' : 'The opener, Support Team, and Support Admins can chat until someone claims this ticket.',
     ]);
 }
 
@@ -225,15 +226,16 @@ async function openTicket(interaction, category, answers) {
         .filter(Boolean).map(match => Number(match[1]));
     const number = Math.max(0, ...existingNumbers) + 1;
     const state = { ownerId: interaction.user.id, categoryKey: category.key, claimerId: null, openedAt: Date.now() };
-    const supportRoles = new Set([SETTINGS.supportTeamRoleId, SETTINGS.supportAdminRoleId, category.pingRoleId].filter(isId));
+    const staffRoles = new Set([SETTINGS.supportTeamRoleId, SETTINGS.supportAdminRoleId, category.pingRoleId].filter(isId));
     const overwrites = [
         { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.SendMessages] },
         { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.AttachFiles, PermissionFlagsBits.EmbedLinks] },
-        ...[...supportRoles].map(id => ({
-            id,
-            allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory],
-            ...(id === SETTINGS.supportAdminRoleId ? { allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.SendMessages] } : {}),
-        })),
+        ...[...staffRoles].map(id => {
+            const allow = [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory];
+            const canChat = id === SETTINGS.supportAdminRoleId || id === SETTINGS.supportTeamRoleId;
+            if (canChat) allow.push(PermissionFlagsBits.SendMessages);
+            return { id, allow, ...(!canChat ? { deny: [PermissionFlagsBits.SendMessages] } : {}) };
+        }),
     ];
     if (guild.members.me) overwrites.push({ id: guild.members.me.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels, PermissionFlagsBits.AttachFiles] });
 
@@ -245,7 +247,7 @@ async function openTicket(interaction, category, answers) {
         permissionOverwrites: overwrites,
         reason: `Ticket opened by ${interaction.user.tag} (${category.label})`,
     });
-    const pingRoleIds = [...new Set([SETTINGS.supportTeamRoleId, category.pingRoleId].filter(isId))];
+    const pingRoleIds = [...new Set([category.pingRoleId || SETTINGS.supportTeamRoleId].filter(isId))];
     const content = [...pingRoleIds.map(roleId => `<@&${roleId}>`), `<@${interaction.user.id}>`].join(' ');
     const lines = [
         content,
@@ -433,13 +435,15 @@ const prefixCommands = [
     { name: 'ticketpanel', execute: async message => { if (await staffOnly(message)) await createPanel(message); } },
     { name: 'inactive', execute: async message => {
         const state = getPrefixTicket(message); if (!state || !await staffOnly(message)) return;
+        const target = message.mentions.users.first();
+        if (!target) return message.reply(`Usage: ${SETTINGS.prefix}inactive @user`);
         const container = ticketContainer('<:maui:1556034121271214141> | **Ticket Inactivity Notice**', [
-            `-# <@${state.ownerId}>`,
+            `-# <@${target.id}>`,
             '',
             '<:summerpopsiclestick:1511371881817702450> This ticket has been marked as **inactive** due to no recent response or activity. If you still require assistance, please respond within **24 hours** to prevent this ticket from being closed. If no response is received within this timeframe, the ticket will be **closed**.',
         ]);
         await message.channel.send(ticketPayload(container, [], {
-            allowedMentions: { users: [state.ownerId] },
+            allowedMentions: { users: [target.id] },
         }));
     } },
     { name: 'claim', execute: async message => {
@@ -465,6 +469,44 @@ const prefixCommands = [
         await message.channel.send(ticketPayload(claimStatusContainer(false, message.author.id), [], {
             allowedMentions: { users: [message.author.id] },
         }));
+    } },
+    { name: 'close', execute: async (message, args = []) => {
+        const state = getPrefixTicket(message); if (!state) return;
+        if (!canUseSupportButtons(message.member)) return message.reply('Only the Support Team or Support Admin can use this command.');
+        if (state.claimerId) return message.reply(`This command only closes unclaimed tickets. This ticket is claimed by <@${state.claimerId}>.`);
+
+        const channel = message.channel;
+        const reason = safeText(args.join(' ') || 'Closed by support staff using -close');
+        const category = categoryFor(state.categoryKey);
+        const file = await transcriptHtml(channel, state, category, reason);
+        const logChannel = isId(SETTINGS.transcriptChannelId)
+            ? await message.guild.channels.fetch(SETTINGS.transcriptChannelId).catch(() => null)
+            : null;
+        const transcriptTarget = logChannel?.isTextBased() ? logChannel : channel;
+        const summary = ticketContainer(SETTINGS.transcriptTitle, [
+            `**Ticket:** ${channel.name}`,
+            `**Opened by:** <@${state.ownerId}>`,
+            `**Category:** ${category?.label || state.categoryKey}`,
+            '**Claimed by:** Unclaimed',
+            `**Opened:** <t:${Math.floor(state.openedAt / 1000)}:F>`,
+            `**Closed by:** <@${message.author.id}>`,
+            `**Closing reason:** ${reason}`,
+            `Transcript attached: **${channel.name}-transcript.html**`,
+        ]);
+        summary.addFileComponents(new FileBuilder().setURL(`attachment://${file.name}`));
+        await transcriptTarget.send(ticketPayload(summary, [], {
+            files: [file],
+            allowedMentions: { users: [state.ownerId, message.author.id] },
+        }));
+
+        if (transcriptTarget === channel) {
+            await channel.setName(`closed-${channel.name}`.slice(0, 100)).catch(() => null);
+            await channel.permissionOverwrites.edit(state.ownerId, { ViewChannel: false, SendMessages: false }).catch(() => null);
+            await channel.setTopic(`maui-closed|${state.ownerId}|${state.categoryKey}||${state.openedAt}`.slice(0, 1024)).catch(() => null);
+            return message.reply('Ticket closed and transcript saved in this channel.');
+        }
+        await message.reply('Ticket closed. The transcript was saved, and this channel will be deleted in 5 seconds.');
+        setTimeout(() => channel.delete(`Ticket closed by ${message.author.tag}: ${reason}`).catch(() => null), 5000);
     } },
     { name: 'rename', execute: async (message, args) => {
         const state = getPrefixTicket(message); if (!state || !await staffOnly(message)) return;
