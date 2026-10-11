@@ -7,7 +7,7 @@ const {
 } = require('discord.js');
 
 // ==== CONFIG ====
-const WELCOME_CHANNEL_ID = '1558527153719738508';
+const WELCOME_CHANNEL_ID = '1471165462099394725';
 
 module.exports = {
     name: 'guildMemberAdd',
@@ -23,11 +23,10 @@ module.exports = {
             .addTextDisplayComponents(
                 new TextDisplayBuilder().setContent(
                     [
-                        `## <:cutecoolstars:1417853805482999930>  **Welcome to Scoops!**`,
-                        `Welcome, **${member}**! We're so glad to have you join **Scoops**! 💗 ` +
-                        `Whether you're here to be part of our community, explore our game, ` +
-                        `meet new people, or find opportunities to join our team, we're excited to have you here. ` +
-                        `We hope you'll feel right at home and enjoy everything Scoops has to offer!`,
+                        '## 🌺 Welcome to Maui,',
+                        `Welcome, **${member}**! We're excited to have you here at **Maui**.`,
+                        "Whether you're here to explore our utilities, get support, or become part of our team, Maui is here to make your experience simpler and more efficient.",
+                        "We're glad to have you with us!",
                     ].join('\n')
                 )
             )
@@ -36,12 +35,11 @@ module.exports = {
             .addTextDisplayComponents(
                 new TextDisplayBuilder().setContent(
                     [
-                        `### <:vanillacupckake:1404329184750469180>**Getting Started at Scoops**`,
-                        `• Explore our ** <#1400847772244115506>** channels to learn more about our community and what we offer.`,
-                        `• Head over to ** <#1406354181002104872>** to select your preferred roles and personalize your experience.`,
-                        `• Check out ** <#1558525058815754400>** regularly to stay informed about the latest news and updates.`,
-                        `• Looking to join our team? Keep an eye out for upcoming applications and available positions!`,
-                        `• Most importantly, connect with others, get involved, and have fun being part of the **Scoops** community! 💗`,
+                        '## 🌴 **Your journey starts here**',
+                        '• Take a moment to explore our **<#1471165462099394721>** channels and learn more about Maui.',
+                        '• Customize your experience by checking out **<id:customize>** and selecting the roles you would like.',
+                        '• Stay in the loop with our latest announcements, updates, and information through **<#1556059223798845460>**.',
+                        '• Most importantly, have fun, get involved, and enjoy everything Maui has to offer!',
                     ].join('\n')
                 )
             )
