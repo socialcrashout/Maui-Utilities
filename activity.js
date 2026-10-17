@@ -31,9 +31,18 @@ const DEFAULTS = {
     report_channel_id: envId(env.REPORT_CHANNEL_ID),
 };
 
+// Custom emojis — change them here and they update everywhere.
+const E = {
+    green: '<:green:1560866052018274425>',
+    red: '<:red:1560866217005162516>',
+    yellow: '<:yellow:1560866323607724109>',
+    status: '<:status:1560866502612226078>',
+    calendar: '<:Calendar:1560866770636775434>',
+    intern: '🟠', // no custom emoji yet
+};
 const ST = {
-    ACTIVE: '🟢 ACTIVE', INACTIVE: '🔴 INACTIVE', EXCUSED: '🟡 EXCUSED',
-    INTERN: '🟠 ON INTERNSHIP', NONE: 'Not tracked',
+    ACTIVE: `${E.green} ACTIVE`, INACTIVE: `${E.red} INACTIVE`, EXCUSED: `${E.yellow} EXCUSED`,
+    INTERN: `${E.intern} ON INTERNSHIP`, NONE: 'Not tracked',
 };
 const FIELDS = ['messages', 'shifts', 'cohosts', 'excused'];
 const mention = (id) => `<@${id}>`;
@@ -225,9 +234,9 @@ async function reportPanel(guild) {
         title: '📋 HRD | Weekly Management Activity',
         intro: `**Week:** ${weekKey()}`,
         sections: [
-            ['**📊 Weekly Status**', `🟢 **Active:** ${active.length}`, `🔴 **Inactive:** ${inactive.length}`, `🟡 **Excused:** ${excused.length}`],
+            [`**${E.status} Weekly Status**`, `${E.green} **Active:** ${active.length}`, `${E.red} **Inactive:** ${inactive.length}`, `${E.yellow} **Excused:** ${excused.length}`],
             ['**🏆 Top Management**', ...(top.length ? top : ['No qualifying activity yet.'])],
-            ['**🔴 Inactive Members**', ...(lines.length ? lines : ['Everyone has met a requirement! 🎉'])],
+            [`**${E.red} Inactive Members**`, ...(lines.length ? lines : ['Everyone has met a requirement! 🎉'])],
         ],
         footer: 'Management must complete ONE requirement each week. Interns are exempt.',
     });
@@ -238,10 +247,10 @@ async function showHistory(i, member) {
     const rows = await col('activity_weeks').find({ userId: member.id }).sort({ week: -1 }).limit(8).toArray();
     if (!rows.length) return say(i, 'No activity history found.', true);
     return respond(i, panel({
-        title: `📚 Activity History | ${escapeMarkdown(member.displayName)}`,
+        title: `${E.status} Activity History | ${escapeMarkdown(member.displayName)}`,
         sections: [rows.map((d) => {
             const r = toRow(d);
-            return `**${d.week}** — ${r.messages} msgs • ${r.shifts} shifts • ${r.cohosts} co-hosts${r.excused ? ' • 🟡 Excused' : ''}`;
+            return `**${d.week}** — ${r.messages} msgs • ${r.shifts} shifts • ${r.cohosts} co-hosts${r.excused ? ` • ${E.yellow} Excused` : ''}`;
         })],
     }));
 }
@@ -281,7 +290,7 @@ async function target(i) {
     if (!m) await say(i, '❌ I could not find that member in this server.', true);
     return m;
 }
-const internBlock = (i) => say(i, '🟠 That member is on internship and does not need activity logged.', true);
+const internBlock = (i) => say(i, `${E.intern} That member is on internship and does not need activity logged.`, true);
 
 // ---- viewing ----
 cmd(B('activity', "View a management member's weekly activity.").addUserOption(memberOpt), async (i) => {
@@ -307,7 +316,7 @@ cmd(B('requirements', 'Show the current management activity requirements.'), (i)
     sections: [
         Object.entries(RANKS).map(([rank, d]) =>
             `**${rank}:** ${d.messages} messages OR ${d.shifts} ${rank === COORD ? 'qualifying co-host' : 'shift(s)'}`),
-        '🟠 **Management Intern:** Exempt from all activity requirements.',
+        `${E.intern} **Management Intern:** Exempt from all activity requirements.`,
     ],
 })));
 
@@ -328,7 +337,7 @@ cmd(B('interns', 'List management members currently on internship.'), async (i) 
     await defer(i);
     const { interns } = await collect(i.guild);
     return respond(i, panel({
-        title: '🟠 Management Interns',
+        title: `${E.intern} Management Interns`,
         sections: [interns.length ? interns.map((m) => mention(m.id)) : 'No management interns found.'],
     }));
 });
@@ -346,9 +355,9 @@ cmd(B('checkall', 'Check all tracked management members.'), async (i) => {
     const { tracked, interns } = await collect(i.guild);
     const n = (s) => tracked.filter((x) => x.status === s).length;
     return respond(i, panel({
-        title: '📊 Management Check',
-        sections: [[`🟢 Active: **${n(ST.ACTIVE)}**`, `🔴 Inactive: **${n(ST.INACTIVE)}**`,
-            `🟡 Excused: **${n(ST.EXCUSED)}**`, `🟠 Interns: **${interns.length}**`]],
+        title: `${E.status} Management Check`,
+        sections: [[`${E.green} Active: **${n(ST.ACTIVE)}**`, `${E.red} Inactive: **${n(ST.INACTIVE)}**`,
+            `${E.yellow} Excused: **${n(ST.EXCUSED)}**`, `${E.intern} Interns: **${interns.length}**`]],
     }));
 }, { hrd: true });
 
@@ -357,14 +366,14 @@ cmd(B('inactive', 'List all currently inactive management members.'), async (i) 
     const { tracked } = await collect(i.guild);
     const lines = tracked.filter((x) => x.status === ST.INACTIVE).slice(0, 30)
         .map((x) => `${mention(x.member.id)} — ${x.rank} — ${x.row.messages} msgs • ${x.row.shifts} shifts`);
-    return respond(i, panel({ title: '🔴 Inactive Management', sections: [lines.length ? lines : 'No inactive members.'] }));
+    return respond(i, panel({ title: `${E.red} Inactive Management`, sections: [lines.length ? lines : 'No inactive members.'] }));
 }, { hrd: true });
 
 cmd(B('excused', 'List members excused this week.'), async (i) => {
     await defer(i);
     const { tracked } = await collect(i.guild);
     const list = tracked.filter((x) => x.row.excused).map((x) => mention(x.member.id));
-    return respond(i, panel({ title: '🟡 Excused this week', sections: [list.length ? list : 'None'] }));
+    return respond(i, panel({ title: `${E.yellow} Excused this week`, sections: [list.length ? list : 'None'] }));
 }, { hrd: true });
 
 cmd(B('previousweek', "View the previous week's activity report."), async (i) => {
@@ -376,10 +385,10 @@ cmd(B('previousweek', "View the previous week's activity report."), async (i) =>
         const m = await i.guild.members.fetch(d.userId).catch(() => null);
         if (!m || isIntern(m)) continue;
         const r = toRow(d);
-        lines.push(`${mention(m.id)} — ${r.messages} msgs • ${r.shifts} shifts • ${r.cohosts} co-hosts${r.excused ? ' • 🟡' : ''}`);
+        lines.push(`${mention(m.id)} — ${r.messages} msgs • ${r.shifts} shifts • ${r.cohosts} co-hosts${r.excused ? ` • ${E.yellow}` : ''}`);
     }
     return respond(i, panel({
-        title: '📅 Previous Week',
+        title: `${E.calendar} Previous Week`,
         intro: `**Week:** ${prev}`,
         sections: [lines.length ? lines : 'No saved activity for the previous week.'],
     }));
@@ -409,7 +418,7 @@ cmd(B('excuse', 'Excuse a management member for the current week.').addUserOptio
 async (i) => {
     const m = await target(i); if (!m) return;
     await saveCounts(m.id, { excused: 1 });
-    return say(i, `🟡 ${mention(m.id)} is now marked **EXCUSED** for this week.\nReason: ${i.options.getString('reason')}`);
+    return say(i, `${E.yellow} ${mention(m.id)} is now marked **EXCUSED** for this week.\nReason: ${i.options.getString('reason')}`);
 }, { hrd: true });
 
 cmd(B('unexcuse', 'Remove a weekly excuse.').addUserOption(memberOpt), async (i) => {
@@ -461,7 +470,7 @@ cmd(B('setinternrole', 'Set the Management Intern role.')
 async (i) => {
     const role = i.options.getRole('role', true);
     await setSetting('intern_role_id', role.id);
-    return say(i, `🟠 Management Intern role set to <@&${role.id}>. Existing interns are now exempt.`);
+    return say(i, `${E.intern} Management Intern role set to <@&${role.id}>. Existing interns are now exempt.`);
 }, { hrd: true });
 
 cmd(B('setcohostrole', 'Set the qualifying Coordinator co-host role.')
@@ -508,7 +517,7 @@ async function toggleIntern(i, targetId) {
         }
         await member.roles.add(role, `Internship started by ${i.user.tag}`);
         await resetActivity(member.id);
-        return say(i, `🟠 ${mention(member.id)} is now ON INTERNSHIP and exempt from requirements.`, true);
+        return say(i, `${E.intern} ${mention(member.id)} is now ON INTERNSHIP and exempt from requirements.`, true);
     } catch (err) {
         if (err.code === 50013) return say(i, '❌ I cannot manage that role. Make sure my bot role is above the target role.', true);
         throw err;
