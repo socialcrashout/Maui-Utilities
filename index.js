@@ -8,6 +8,7 @@ const { connectDB } = require('./db');
 const ticketSystem = require('./ticketSystem');
 const { startRobloxGroupCounter } = require('./robloxGroupCounter');
 const { joinIdleVoiceChannel } = require('./voiceAutoJoin');
+const activity = require('./activity');
 
 const { DISCORD_TOKEN, CLIENT_ID, GUILD_ID, PREFIX } = process.env;
 
@@ -76,16 +77,26 @@ function loadPrefixCommands() {
 function loadSlashCommands() {
     client.slashCommands.clear();
     const slashPath = path.join(__dirname, 'commands');
-    if (!fs.existsSync(slashPath)) return [];
-
-    const files = fs.readdirSync(slashPath).filter(f => f.endsWith('.js'));
     const slashData = [];
-    for (const file of files) {
-        const command = requireCommand(path.join(slashPath, file));
-        if (command && command.data && command.execute) {
-            client.slashCommands.set(command.data.name, command);
-            slashData.push(command.data.toJSON());
+
+    if (fs.existsSync(slashPath)) {
+        const files = fs.readdirSync(slashPath).filter(f => f.endsWith('.js'));
+        for (const file of files) {
+            const command = requireCommand(path.join(slashPath, file));
+            if (command && command.data && command.execute) {
+                client.slashCommands.set(command.data.name, command);
+                slashData.push(command.data.toJSON());
+            }
         }
+    }
+
+    // HRD activity commands (activity.js). These win over a same-named file in /commands.
+    for (const command of activity.commands) {
+        const json = command.data.toJSON();
+        const existing = slashData.findIndex(d => d.name === json.name);
+        if (existing !== -1) slashData.splice(existing, 1);
+        client.slashCommands.set(json.name, command);
+        slashData.push(json);
     }
     console.log(`Loaded ${client.slashCommands.size} slash commands.`);
     return slashData;
@@ -163,6 +174,7 @@ client.once(Events.ClientReady, c => {
     joinIdleVoiceChannel(c).catch(err => {
         console.error('Failed to join configured voice channel:', err.message);
     });
+    activity.init(c).catch(err => console.error('Failed to start activity system:', err));
     ticketSystem.syncOpenTicketPermissions(c).catch(err => {
         console.error('Failed to sync open ticket permissions:', err);
     });
