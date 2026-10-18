@@ -43,9 +43,9 @@ const DEPARTMENTS = {
         name: 'Public Relations Department',
         roleId: envId(env.CORP_PUBLIC_RELATIONS_ROLE_ID),
         requirements: {
-            Junior: { messages: 50, shifts: 1, mode: 'or' },
-            Senior: { messages: 45, shifts: 1, mode: 'or' },
-            Head: { messages: 35, shifts: 1, mode: 'or' },
+            Junior: { messages: 50, shifts: 0, mode: 'or' },
+            Senior: { messages: 45, shifts: 0, mode: 'or' },
+            Head: { messages: 35, shifts: 0, mode: 'or' },
         },
     },
 };
@@ -226,12 +226,14 @@ async function activityPanel(member, { always = false, extra = [], rows = [] } =
     if (!req) {
         return always ? panel({         title: 'Corporate | Member Panel', intro: `Managing ${mention(member.id)}`, sections: extra, rows }) : null;
     }
+    const activityLines = [`**Messages:** ${row.messages}/${req.messages}`];
+    if (req.shifts) activityLines.push(`**Shifts:** ${row.shifts}/${req.shifts}`);
     return panel({
         title: 'Corporate | Corporate Activity',
         sections: [
             [`**Member:** ${mention(member.id)}`, `**Department:** ${department}`, `**Rank:** ${rank}`, `**Status:** ${status}`],
             [`**Requirements:** ${req.messages} messages${req.shifts ? ` ${req.mode.toUpperCase()} ${req.shifts} shift(s)` : ''}`,
-                `**Activity:** ${activityText(req, row)}`, `**Week:** ${week}`],
+                ...activityLines, `**Week:** ${week}`],
             ...extra,
         ],
         rows,
@@ -443,9 +445,14 @@ cmd(B('checkall', 'Check all tracked corporate members.'), async (i) => {
 cmd(B('inactive', 'List all currently inactive corporate members.'), async (i) => {
     await defer(i);
     const { tracked } = await collect(i.guild);
-    const lines = tracked.filter((x) => x.status === ST.INACTIVE).slice(0, 30)
-        .map((x) => `${mention(x.member.id)} — ${x.department} • ${x.rank} — ${activityText(x.req, x.row)}`);
-    return respond(i, panel({ title: `${E.red} Inactive Corporate Members`, sections: [lines.length ? lines : 'No inactive members.'] }));
+    const sections = Object.values(DEPARTMENTS).map((department) => {
+        const inactive = tracked.filter((x) => x.department === department.name && x.status === ST.INACTIVE);
+        const lines = inactive.slice(0, 10)
+            .map((x) => `${mention(x.member.id)} — ${x.rank} — ${activityText(x.req, x.row)}`);
+        if (inactive.length > lines.length) lines.push(`…and ${inactive.length - lines.length} more`);
+        return [`**${department.name}**`, ...(lines.length ? lines : ['No inactive members.'])];
+    });
+    return respond(i, panel({ title: `${E.red} Inactive Corporate Members`, sections }));
 }, { hrd: true });
 
 cmd(B('excused', 'List members excused this week.'), async (i) => {
@@ -601,55 +608,6 @@ cmd(B('manage', 'Open a Corporate Activity panel for a Discord member.').addUser
         }
     });
     collector.on('end', async () => respond(i, await build(true)).catch(() => {}));
-}, { hrd: true });
-
-// ---- Discord role / nickname tools ----
-const roleTool = (name, description, verb) => cmd(
-    B(name, description).addUserOption(memberOpt)
-        .addRoleOption((o) => o.setName('role').setDescription('The role.').setRequired(true)),
-    async (i) => {
-        const m = await target(i); if (!m) return;
-        const role = i.options.getRole('role', true);
-        if (role.position >= i.guild.members.me.roles.highest.position) {
-            return say(i, `❌ I cannot ${verb} a role equal to or above my highest role.`, true);
-        }
-        try {
-            if (verb === 'give') await m.roles.add(role.id, `Role assigned by ${i.user.tag}`);
-            else await m.roles.remove(role.id, `Role removed by ${i.user.tag}`);
-            return say(i, verb === 'give'
-                ? `✅ Gave <@&${role.id}> to ${mention(m.id)}.`
-                : `✅ Removed <@&${role.id}> from ${mention(m.id)}.`);
-        } catch (err) {
-            if (err.code === 50013) return say(i, '❌ Discord denied the role change. Check my role hierarchy and permissions.', true);
-            throw err;
-        }
-    }, { hrd: true });
-roleTool('setrole', 'Give a Discord role to a member.', 'give');
-roleTool('removerole', 'Remove a Discord role from a member.', 'remove');
-
-cmd(B('nickname', "Change a member's Discord nickname.").addUserOption(memberOpt)
-    .addStringOption((o) => o.setName('name').setDescription('New nickname.').setRequired(true).setMaxLength(32)),
-async (i) => {
-    const m = await target(i); if (!m) return;
-    const name = i.options.getString('name', true);
-    try {
-        await m.setNickname(name, `Nickname changed by ${i.user.tag}`);
-        return say(i, `✅ Changed ${mention(m.id)}'s nickname to **${escapeMarkdown(name)}**.`);
-    } catch (err) {
-        if (err.code === 50013) return say(i, '❌ I cannot change that nickname because of role hierarchy/permissions.', true);
-        throw err;
-    }
-}, { hrd: true });
-
-cmd(B('resetnickname', "Reset a member's Discord nickname.").addUserOption(memberOpt), async (i) => {
-    const m = await target(i); if (!m) return;
-    try {
-        await m.setNickname(null, `Nickname reset by ${i.user.tag}`);
-        return say(i, `✅ Reset ${mention(m.id)}'s nickname.`);
-    } catch (err) {
-        if (err.code === 50013) return say(i, '❌ I cannot reset that nickname.', true);
-        throw err;
-    }
 }, { hrd: true });
 
 // ---- warnings ----
