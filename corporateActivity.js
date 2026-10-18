@@ -249,6 +249,9 @@ function reportPanel(tracked, page = 0) {
     const medals = ['🥇', '🥈', '🥉'];
     const top = [...active].sort((a, b) => b.ratio - a.ratio).slice(0, 3)
         .map((x, i) => `${medals[i]} ${mention(x.member.id)} — **${(x.ratio * 100).toFixed(0)}%**`);
+    const activityLines = [...members].sort((a, b) => a.rank.localeCompare(b.rank)).slice(0, 25)
+        .map((x) => `${mention(x.member.id)} — ${x.rank} • ${x.status} — ${activityText(x.req, x.row)}`);
+    if (members.length > activityLines.length) activityLines.push(`…and ${members.length - activityLines.length} more`);
     const inactiveLines = inactive.slice(0, 20)
         .map((x) => `${mention(x.member.id)} — ${x.rank} — ${activityText(x.req, x.row)}`);
     if (inactive.length > inactiveLines.length) inactiveLines.push(`…and ${inactive.length - inactiveLines.length} more`);
@@ -270,6 +273,7 @@ function reportPanel(tracked, page = 0) {
         sections: [
             [`**${E.status} Weekly Status**`, `${E.green} **Active:** ${active.length}`, `${E.red} **Inactive:** ${inactive.length}`, `${E.yellow} **Excused:** ${excused.length}`],
             ['**🏆 Top Activity**', ...(top.length ? top : ['No qualifying activity yet.'])],
+            ['**Member Activity**', ...(activityLines.length ? activityLines : ['No tracked members in this department.'])],
             [`**${E.red} Inactive Members**`, ...(inactiveLines.length ? inactiveLines : ['No inactive members.'])],
             [`**${E.yellow} Excused Members**`, ...(excusedLines.length ? excusedLines : ['No excused members.'])],
         ],
