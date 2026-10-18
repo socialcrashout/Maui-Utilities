@@ -329,15 +329,11 @@ function trackingBlock(i, member) {
 }
 
 // ---- viewing ----
-cmd(B('activity', "View your weekly activity, or another corporate member's activity.").addUserOption(
-    (o) => o.setName('member').setDescription('View another member instead.')
-), async (i) => {
-    const m = i.options.getMember('member') ?? i.member;
-    const self = m.id === i.member.id;
-    const p = await activityPanel(m);
+cmd(B('activity', "View your own weekly corporate activity."), async (i) => {
+    const p = await activityPanel(i.member);
     return p
-        ? respond(i, p, { ephemeral: self })
-        : say(i, self ? 'You do not have a tracked corporate rank.' : 'That member does not have a tracked corporate rank.', true);
+        ? respond(i, p, { ephemeral: true })
+        : say(i, 'You do not have a tracked corporate rank.', true);
 });
 
 cmd(B('status', "View a member's current corporate status.").addUserOption(memberOpt), async (i) => {
