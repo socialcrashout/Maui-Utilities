@@ -238,26 +238,74 @@ async function activityPanel(member, { always = false, extra = [], rows = [] } =
     });
 }
 
-async function reportPanel(guild) {
-    const { tracked } = await collect(guild);
-    const by = (s) => tracked.filter((x) => x.status === s);
+function reportPanel(tracked, page = 0) {
+    const departments = Object.values(DEPARTMENTS);
+    const department = departments[page];
+    const members = tracked.filter((x) => x.department === department.name);
+    const by = (s) => members.filter((x) => x.status === s);
     const [active, inactive, excused] = [by(ST.ACTIVE), by(ST.INACTIVE), by(ST.EXCUSED)];
     const medals = ['🥇', '🥈', '🥉'];
     const top = [...active].sort((a, b) => b.ratio - a.ratio).slice(0, 3)
         .map((x, i) => `${medals[i]} ${mention(x.member.id)} — **${(x.ratio * 100).toFixed(0)}%**`);
-    const lines = inactive.slice(0, 15)
-        .map((x) => `${mention(x.member.id)} — ${x.department} • ${x.rank} — ${activityText(x.req, x.row)}`);
-    if (inactive.length > 15) lines.push(`…and ${inactive.length - 15} more`);
+    const inactiveLines = inactive.slice(0, 20)
+        .map((x) => `${mention(x.member.id)} — ${x.rank} — ${activityText(x.req, x.row)}`);
+    if (inactive.length > inactiveLines.length) inactiveLines.push(`…and ${inactive.length - inactiveLines.length} more`);
+    const excusedLines = excused.slice(0, 20)
+        .map((x) => `${mention(x.member.id)} — ${x.rank}`);
+    if (excused.length > excusedLines.length) excusedLines.push(`…and ${excused.length - excusedLines.length} more`);
+    const pageRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('corp_report_previous').setLabel('Previous')
+            .setStyle(ButtonStyle.Secondary).setDisabled(page === 0),
+        new ButtonBuilder().setCustomId('corp_report_page').setLabel(`${page + 1} / ${departments.length}`)
+            .setStyle(ButtonStyle.Secondary).setDisabled(true),
+        new ButtonBuilder().setCustomId('corp_report_next').setLabel('Next')
+            .setStyle(ButtonStyle.Primary).setDisabled(page === departments.length - 1),
+    );
 
     return panel({
-        title: '📋 Corporate | Weekly Corporate Activity',
-        intro: `**Week:** ${weekKey()}`,
+        title: `📋 Corporate | ${department.name} Activity`,
+        intro: `**Week:** ${weekKey()} • **Department ${page + 1} of ${departments.length}**`,
         sections: [
             [`**${E.status} Weekly Status**`, `${E.green} **Active:** ${active.length}`, `${E.red} **Inactive:** ${inactive.length}`, `${E.yellow} **Excused:** ${excused.length}`],
-            ['**🏆 Top Corporate Activity**', ...(top.length ? top : ['No qualifying activity yet.'])],
-            [`**${E.red} Inactive Members**`, ...(lines.length ? lines : ['Everyone has met a requirement! 🎉'])],
+            ['**🏆 Top Activity**', ...(top.length ? top : ['No qualifying activity yet.'])],
+            [`**${E.red} Inactive Members**`, ...(inactiveLines.length ? inactiveLines : ['No inactive members.'])],
+            [`**${E.yellow} Excused Members**`, ...(excusedLines.length ? excusedLines : ['No excused members.'])],
         ],
-        footer: 'Requirements vary by department and rank.',
+        footer: 'Requirements vary by rank. Use the buttons to switch departments.',
+        rows: [pageRow],
+    });
+}
+
+function attachReportPagination(message, tracked) {
+    const departments = Object.values(DEPARTMENTS);
+    let currentPage = 0;
+    const collector = message.createMessageComponentCollector({
+        componentType: ComponentType.Button,
+        time: 15 * 60_000,
+        filter: (button) => button.customId === 'corp_report_previous' || button.customId === 'corp_report_next',
+    });
+    collector.on('collect', async (button) => {
+        try {
+            currentPage = Math.max(0, Math.min(departments.length - 1,
+                currentPage + (button.customId === 'corp_report_next' ? 1 : -1)));
+            await button.update({
+                components: [reportPanel(tracked, currentPage)],
+                flags: MessageFlags.IsComponentsV2,
+                allowedMentions: NO_PINGS,
+            });
+        } catch (err) {
+            console.error('[corp-activity] Could not change report department page:', err);
+            if (!button.replied && !button.deferred) {
+                await button.reply({ content: '❌ Could not change the report page.', ephemeral: true }).catch(console.error);
+            }
+        }
+    });
+    collector.on('end', () => {
+        message.edit({
+            components: [reportPanel(tracked, currentPage)],
+            flags: MessageFlags.IsComponentsV2,
+            allowedMentions: NO_PINGS,
+        }).catch((err) => console.error('[corp-activity] Could not disable expired report buttons:', err));
     });
 }
 
@@ -373,7 +421,12 @@ for (const [name, description] of [
     ['report', 'Generate a full weekly Corporate Activity report.'],
     ['closeweek', 'Generate the current weekly report without ending the week.'],
 ]) {
-    cmd(B(name, description), async (i) => { await defer(i); return respond(i, await reportPanel(i.guild)); }, { hrd: true });
+    cmd(B(name, description), async (i) => {
+        await defer(i);
+        const { tracked } = await collect(i.guild);
+        await respond(i, reportPanel(tracked));
+        attachReportPagination(await i.fetchReply(), tracked);
+    }, { hrd: true });
 }
 
 cmd(B('checkall', 'Check all tracked corporate members.'), async (i) => {
@@ -657,9 +710,11 @@ async function weeklyTick(client) {
         const channel = guild.channels.cache.get(channelId);
         if (!channel?.isTextBased()) continue;
         try {
-            await channel.send({
-                components: [await reportPanel(guild)], flags: MessageFlags.IsComponentsV2, allowedMentions: NO_PINGS,
+            const { tracked } = await collect(guild);
+            const report = await channel.send({
+                components: [reportPanel(tracked)], flags: MessageFlags.IsComponentsV2, allowedMentions: NO_PINGS,
             });
+            attachReportPagination(report, tracked);
         } catch (err) {
             console.error(`[corp-activity] Could not send weekly report in ${channelId}:`, err.message);
         }
