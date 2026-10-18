@@ -5,23 +5,24 @@ const { resolveMember, resolveUser, extractId } = require('../utils/resolveTarge
 
 module.exports = {
     name: 'ban',
-    description: 'Ban a member. Usage: ban @user|id [reason]',
+    description: 'Ban a user by mention or ID, even if they are not in the server. Usage: ban @user|id [reason]',
 
     async execute(message, args, client) {
         if (!hasModPermission(message.member)) {
-            return message.reply(containerPayload(quickContainer('❌ Missing Permissions', "You don't have permission to ban members.")));
+            return message.reply(containerPayload(quickContainer('<:lastupdated:1554330566244171836> Missing Permissions', "You don't have permission to ban members.")));
         }
 
         const id = extractId(args[0]);
         if (!id) {
-            return message.reply(containerPayload(quickContainer('❌ Invalid User', 'Usage: `ban @user|id [reason]`')));
+            return message.reply(containerPayload(quickContainer('<:lastupdated:1554330566244171836> Invalid User', 'Usage: `ban @user|id [reason]`')));
         }
 
-        const targetMember = await resolveMember(message, args[0]);
-        const targetUser = targetMember ? targetMember.user : await resolveUser(client, args[0]);
+        // Member is null if they aren't in the server, which is fine
+        const targetMember = await resolveMember(message, id).catch(() => null);
+        const targetUser = targetMember ? targetMember.user : await resolveUser(client, id).catch(() => null);
 
         if (!targetUser) {
-            return message.reply(containerPayload(quickContainer('❌ User Not Found', "Couldn't find that user.")));
+            return message.reply(containerPayload(quickContainer('<:lastupdated:1554330566244171836> User Not Found', "Couldn't find a Discord user with that ID.")));
         }
 
         const reason = args.slice(1).join(' ') || 'No reason provided';
@@ -36,7 +37,7 @@ module.exports = {
         });
 
         if (!result.ok) {
-            return message.reply(containerPayload(quickContainer('❌ Ban Failed', result.reason)));
+            return message.reply(containerPayload(quickContainer('<:lastupdated:1554330566244171836> Ban Failed', result.reason)));
         }
 
         return message.channel.send(result.payload);

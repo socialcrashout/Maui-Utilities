@@ -9,6 +9,7 @@ const ticketSystem = require('./ticketSystem');
 const { startRobloxGroupCounter } = require('./robloxGroupCounter');
 const { joinIdleVoiceChannel } = require('./voiceAutoJoin');
 const activity = require('./activity');
+const corporateActivity = require('./corporateActivity');
 
 const { DISCORD_TOKEN, CLIENT_ID, GUILD_ID, PREFIX } = process.env;
 
@@ -98,6 +99,13 @@ function loadSlashCommands() {
         client.slashCommands.set(json.name, command);
         slashData.push(json);
     }
+    for (const command of corporateActivity.commands) {
+        const json = command.data.toJSON();
+        const existing = slashData.findIndex(d => d.name === json.name);
+        if (existing !== -1) slashData.splice(existing, 1);
+        client.slashCommands.set(json.name, command);
+        slashData.push(json);
+    }
     console.log(`Loaded ${client.slashCommands.size} slash commands.`);
     return slashData;
 }
@@ -175,6 +183,7 @@ client.once(Events.ClientReady, c => {
         console.error('Failed to join configured voice channel:', err.message);
     });
     activity.init(c).catch(err => console.error('Failed to start activity system:', err));
+    corporateActivity.init(c).catch(err => console.error('Failed to start corporate activity system:', err));
     ticketSystem.syncOpenTicketPermissions(c).catch(err => {
         console.error('Failed to sync open ticket permissions:', err);
     });
