@@ -146,6 +146,9 @@ async function deploySlashCommands() {
             ? Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID)
             : Routes.applicationCommands(CLIENT_ID);
 
+        if (GUILD_ID) {
+            await rest.put(Routes.applicationCommands(CLIENT_ID), { body: [] });
+        }
         await rest.put(route, { body: commands });
         console.log('Slash commands successfully deployed.');
     } catch (err) {
