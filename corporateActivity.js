@@ -273,7 +273,7 @@ function reportPanel(tracked, page = 0) {
         sections: [
             [`**${E.status} Weekly Status**`, `${E.green} **Active:** ${active.length}`, `${E.red} **Inactive:** ${inactive.length}`, `${E.yellow} **Excused:** ${excused.length}`],
             ['**🏆 Top Activity**', ...(top.length ? top : ['No qualifying activity yet.'])],
-            ['**Member Activity**', ...(activityLines.length ? activityLines : ['No tracked members in this department.'])],
+            ['**Member Activity**', `**Department:** ${department.name}`, ...(activityLines.length ? activityLines : ['No tracked members in this department.'])],
             [`**${E.red} Inactive Members**`, ...(inactiveLines.length ? inactiveLines : ['No inactive members.'])],
             [`**${E.yellow} Excused Members**`, ...(excusedLines.length ? excusedLines : ['No excused members.'])],
         ],
