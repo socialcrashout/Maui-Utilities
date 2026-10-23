@@ -32,6 +32,7 @@ const SETTINGS = {
     transcriptChannelId: '1484312804830740520',
     supportTeamRoleId: '1556041164031787098',
     supportAdminRoleId: '1556041271490121768',
+    ticketBlacklistRoleId: '1563337716828209212',
     panelTitle: '<:maui:1556034121271214141> | Maui Support',
     panelDescription: `At **Maui**, we strive to provide our community with an organized and reliable support system where all questions, concerns, and requests can be handled efficiently. Before opening a ticket, please take a moment to review the available support categories and select the one that best matches your needs.
 
@@ -75,6 +76,7 @@ const TICKET_PREFIX = 'maui-ticket';
 const isId = value => /^\d{17,20}$/.test(String(value || ''));
 const safeText = (value, max = 1000) => String(value || '').replace(/[<>]/g, '').slice(0, max) || 'Not provided';
 const slug = value => String(value || '').toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 80) || 'ticket';
+const ticketBlacklist = () => getDB().collection('ticketBlacklist');
 
 // ---------------------------------------------------------------------------
 // Ticket state store (memory cache + MongoDB 'tickets' collection).
@@ -382,6 +384,14 @@ async function openTicket(interaction, category, answers) {
     const guild = interaction.guild;
     if (!guild) return interaction.reply({ content: 'Tickets can only be opened in a server.', flags: MessageFlags.Ephemeral });
     if (!isId(SETTINGS.supportCategoryId)) return interaction.reply({ content: 'The support channel category ID is not configured in `ticketSystem.js`.', flags: MessageFlags.Ephemeral });
+    const blacklistEntry = await ticketBlacklist().findOne({ _id: interaction.user.id });
+    if (blacklistEntry) {
+        return interaction.reply({
+            content: `You cannot open tickets because you are ticket-blacklisted.${blacklistEntry.reason ? ` Reason: ${blacklistEntry.reason}` : ''}`,
+            flags: MessageFlags.Ephemeral,
+            allowedMentions: { parse: [] },
+        });
+    }
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const parent = await guild.channels.fetch(SETTINGS.supportCategoryId).catch(() => null);
     if (!parent || parent.type !== ChannelType.GuildCategory) return interaction.editReply({ content: 'The configured support category was not found. Check its ID in `ticketSystem.js`.' });
@@ -600,6 +610,13 @@ const staffOnly = async message => {
     if (!canManage(message.member)) { await message.reply('Only the support team can use ticket staff commands.'); return false; }
     return true;
 };
+const canManageTicketBlacklist = member =>
+    isSupportAdmin(member) ||
+    (isId(SETTINGS.ticketBlacklistRoleId) && member?.roles?.cache?.has(SETTINGS.ticketBlacklistRoleId));
+const ticketBlacklistTargetId = args => {
+    const target = String(args[0] || '').match(/^(?:<@!?(\d{17,20})>|(\d{17,20}))$/);
+    return target?.[1] || target?.[2] || null;
+};
 function getPrefixTicket(message) {
     const state = stateFromChannel(message.channel);
     if (!state) { message.reply('Use this command inside a ticket channel.'); return null; }
@@ -608,6 +625,30 @@ function getPrefixTicket(message) {
 
 const prefixCommands = [
     { name: 'ticketpanel', execute: async message => { if (await staffOnly(message)) await createPanel(message); } },
+    { name: 'ticketblacklist', description: 'Prevent a user from opening tickets. Usage: ticketblacklist @user|id [reason]', execute: async (message, args = []) => {
+        if (!canManageTicketBlacklist(message.member)) return message.reply('Only the configured ticket blacklist role or Support Admin can manage the ticket blacklist.');
+        const userId = ticketBlacklistTargetId(args);
+        if (!userId) return message.reply(`Usage: ${SETTINGS.prefix}ticketblacklist @user|id [reason]`);
+        const reason = args.slice(1).join(' ').trim();
+        const result = await ticketBlacklist().updateOne(
+            { _id: userId },
+            { $setOnInsert: { reason: reason ? safeText(reason) : '', moderatorId: message.author.id, createdAt: new Date() } },
+            { upsert: true },
+        );
+        if (!result.upsertedCount) return message.reply(`<@${userId}> is already ticket-blacklisted.`);
+        return message.reply({
+            content: `<@${userId}> can no longer open tickets.${reason ? ` Reason: ${safeText(reason)}` : ''}`,
+            allowedMentions: { parse: [] },
+        });
+    } },
+    { name: 'ticketunblacklist', description: 'Allow a user to open tickets again. Usage: ticketunblacklist @user|id', execute: async (message, args = []) => {
+        if (!canManageTicketBlacklist(message.member)) return message.reply('Only the configured ticket blacklist role or Support Admin can manage the ticket blacklist.');
+        const userId = ticketBlacklistTargetId(args);
+        if (!userId) return message.reply(`Usage: ${SETTINGS.prefix}ticketunblacklist @user|id`);
+        const result = await ticketBlacklist().deleteOne({ _id: userId });
+        if (!result.deletedCount) return message.reply(`<@${userId}> is not ticket-blacklisted.`);
+        return message.reply(`<@${userId}> can open tickets again.`);
+    } },
     { name: 'inactive', execute: async message => {
         const state = getPrefixTicket(message); if (!state || !await staffOnly(message)) return;
         const target = message.mentions.users.first();
