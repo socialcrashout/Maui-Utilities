@@ -77,6 +77,9 @@ const isId = value => /^\d{17,20}$/.test(String(value || ''));
 const safeText = (value, max = 1000) => String(value || '').replace(/[<>]/g, '').slice(0, max) || 'Not provided';
 const slug = value => String(value || '').toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 80) || 'ticket';
 const ticketBlacklist = () => getDB().collection('ticketBlacklist');
+const hasTicketBlacklistRole = member =>
+    member?.roles?.cache?.has(SETTINGS.ticketBlacklistRoleId) ||
+    (Array.isArray(member?.roles) && member.roles.includes(SETTINGS.ticketBlacklistRoleId));
 
 // ---------------------------------------------------------------------------
 // Ticket state store (memory cache + MongoDB 'tickets' collection).
@@ -384,15 +387,14 @@ async function openTicket(interaction, category, answers) {
     const guild = interaction.guild;
     if (!guild) return interaction.reply({ content: 'Tickets can only be opened in a server.', flags: MessageFlags.Ephemeral });
     if (!isId(SETTINGS.supportCategoryId)) return interaction.reply({ content: 'The support channel category ID is not configured in `ticketSystem.js`.', flags: MessageFlags.Ephemeral });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const blacklistEntry = await ticketBlacklist().findOne({ _id: interaction.user.id });
-    if (blacklistEntry) {
-        return interaction.reply({
-            content: `You cannot open tickets because you are ticket-blacklisted.${blacklistEntry.reason ? ` Reason: ${blacklistEntry.reason}` : ''}`,
-            flags: MessageFlags.Ephemeral,
+    if (hasTicketBlacklistRole(interaction.member) || blacklistEntry) {
+        return interaction.editReply({
+            content: `You cannot open tickets because you are ticket-blacklisted.${blacklistEntry?.reason ? ` Reason: ${blacklistEntry.reason}` : ''}`,
             allowedMentions: { parse: [] },
         });
     }
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const parent = await guild.channels.fetch(SETTINGS.supportCategoryId).catch(() => null);
     if (!parent || parent.type !== ChannelType.GuildCategory) return interaction.editReply({ content: 'The configured support category was not found. Check its ID in `ticketSystem.js`.' });
 
@@ -610,9 +612,7 @@ const staffOnly = async message => {
     if (!canManage(message.member)) { await message.reply('Only the support team can use ticket staff commands.'); return false; }
     return true;
 };
-const canManageTicketBlacklist = member =>
-    isSupportAdmin(member) ||
-    (isId(SETTINGS.ticketBlacklistRoleId) && member?.roles?.cache?.has(SETTINGS.ticketBlacklistRoleId));
+const canManageTicketBlacklist = member => isSupportAdmin(member);
 const ticketBlacklistTargetId = args => {
     const target = String(args[0] || '').match(/^(?:<@!?(\d{17,20})>|(\d{17,20}))$/);
     return target?.[1] || target?.[2] || null;
@@ -629,15 +629,42 @@ const prefixCommands = [
         if (!canManageTicketBlacklist(message.member)) return message.reply('Only the configured ticket blacklist role or Support Admin can manage the ticket blacklist.');
         const userId = ticketBlacklistTargetId(args);
         if (!userId) return message.reply(`Usage: ${SETTINGS.prefix}ticketblacklist @user|id [reason]`);
+        if (!isId(SETTINGS.ticketBlacklistRoleId)) return message.reply('The ticket blacklist role ID is not configured.');
+        let role;
+        let target;
+        try {
+            role = await message.guild.roles.fetch(SETTINGS.ticketBlacklistRoleId);
+            if (!role) return message.reply('The configured ticket blacklist role was not found in this server.');
+            target = await message.guild.members.fetch(userId);
+        } catch (error) {
+            console.error(`Could not prepare ticket blacklist for ${userId}:`, error);
+            return message.reply('Could not find that server member or access the ticket blacklist role.');
+        }
+        const botMember = message.guild.members.me;
+        if (!botMember || role.position >= botMember.roles.highest.position) {
+            return message.reply('The bot role must be higher than the ticket blacklist role to assign it.');
+        }
         const reason = args.slice(1).join(' ').trim();
-        const result = await ticketBlacklist().updateOne(
+        const alreadyHadRole = target.roles.cache.has(role.id);
+        if (!alreadyHadRole) {
+            try {
+                await target.roles.add(role, `Ticket blacklist by ${message.author.tag}${reason ? `: ${safeText(reason)}` : ''}`);
+            } catch (error) {
+                console.error(`Could not assign ticket blacklist role to ${userId}:`, error);
+                return message.reply('Could not assign the ticket blacklist role. Check that the bot has Manage Roles and its role is high enough.');
+            }
+        }
+        await ticketBlacklist().updateOne(
             { _id: userId },
             { $setOnInsert: { reason: reason ? safeText(reason) : '', moderatorId: message.author.id, createdAt: new Date() } },
             { upsert: true },
         );
-        if (!result.upsertedCount) return message.reply(`<@${userId}> is already ticket-blacklisted.`);
+        if (alreadyHadRole) return message.reply({
+            content: `<@${userId}> already has the ticket blacklist role and cannot open tickets.`,
+            allowedMentions: { parse: [] },
+        });
         return message.reply({
-            content: `<@${userId}> can no longer open tickets.${reason ? ` Reason: ${safeText(reason)}` : ''}`,
+            content: `<@${userId}> has been given the ticket blacklist role and can no longer open tickets.${reason ? ` Reason: ${safeText(reason)}` : ''}`,
             allowedMentions: { parse: [] },
         });
     } },
@@ -645,9 +672,35 @@ const prefixCommands = [
         if (!canManageTicketBlacklist(message.member)) return message.reply('Only the configured ticket blacklist role or Support Admin can manage the ticket blacklist.');
         const userId = ticketBlacklistTargetId(args);
         if (!userId) return message.reply(`Usage: ${SETTINGS.prefix}ticketunblacklist @user|id`);
+        let target = message.guild.members.cache.get(userId);
+        if (!target) {
+            try {
+                target = await message.guild.members.fetch(userId);
+            } catch (error) {
+                if (error.code !== 10007) {
+                    console.error(`Could not find ticket blacklist member ${userId}:`, error);
+                    return message.reply('Could not check that member’s ticket blacklist role.');
+                }
+            }
+        }
+        const hadRole = Boolean(target?.roles.cache.has(SETTINGS.ticketBlacklistRoleId));
+        if (hadRole) {
+            try {
+                await target.roles.remove(SETTINGS.ticketBlacklistRoleId, `Ticket blacklist removed by ${message.author.tag}`);
+            } catch (error) {
+                console.error(`Could not remove ticket blacklist role from ${userId}:`, error);
+                return message.reply('Could not remove the ticket blacklist role. Check the bot’s role permissions and hierarchy.');
+            }
+        }
         const result = await ticketBlacklist().deleteOne({ _id: userId });
-        if (!result.deletedCount) return message.reply(`<@${userId}> is not ticket-blacklisted.`);
-        return message.reply(`<@${userId}> can open tickets again.`);
+        if (!result.deletedCount && !hadRole) return message.reply({
+            content: `<@${userId}> is not ticket-blacklisted.`,
+            allowedMentions: { parse: [] },
+        });
+        return message.reply({
+            content: `<@${userId}> has had the ticket blacklist role removed and can open tickets again.`,
+            allowedMentions: { parse: [] },
+        });
     } },
     { name: 'inactive', execute: async message => {
         const state = getPrefixTicket(message); if (!state || !await staffOnly(message)) return;
