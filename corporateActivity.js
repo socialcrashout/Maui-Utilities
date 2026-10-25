@@ -72,10 +72,11 @@ const ST = {
 };
 const FIELDS = ['messages', 'shifts', 'excused'];
 const mention = (id) => `<@${id}>`;
+const reportMentions = (userIds) => ({ parse: [], users: [...new Set(userIds)] });
 const reportUser = (member) => {
     const name = escapeMarkdown(member.displayName);
     const username = escapeMarkdown(member.user.username);
-    return name === username ? name : `${name} (@${username})`;
+    return `${mention(member.id)} — ${name === username ? name : `${name} (@${username})`}`;
 };
 
 // =====================================================================
@@ -252,15 +253,19 @@ function reportPanel(tracked, page = 0) {
     const by = (s) => members.filter((x) => x.status === s);
     const [active, inactive, excused] = [by(ST.ACTIVE), by(ST.INACTIVE), by(ST.EXCUSED)];
     const medals = ['🥇', '🥈', '🥉'];
-    const top = [...active].sort((a, b) => b.ratio - a.ratio).slice(0, 3)
+    const topMembers = [...active].sort((a, b) => b.ratio - a.ratio).slice(0, 3);
+    const activityMembers = [...members].sort((a, b) => a.rank.localeCompare(b.rank)).slice(0, 25);
+    const inactiveMembers = inactive.slice(0, 20);
+    const excusedMembers = excused.slice(0, 20);
+    const top = topMembers
         .map((x, i) => `${medals[i]} ${reportUser(x.member)} — **${(x.ratio * 100).toFixed(0)}%**`);
-    const activityLines = [...members].sort((a, b) => a.rank.localeCompare(b.rank)).slice(0, 25)
+    const activityLines = activityMembers
         .map((x) => `${reportUser(x.member)} — ${x.rank} • ${x.status} — ${activityText(x.req, x.row)}`);
     if (members.length > activityLines.length) activityLines.push(`…and ${members.length - activityLines.length} more`);
-    const inactiveLines = inactive.slice(0, 20)
+    const inactiveLines = inactiveMembers
         .map((x) => `${reportUser(x.member)} — ${x.rank} — ${activityText(x.req, x.row)}`);
     if (inactive.length > inactiveLines.length) inactiveLines.push(`…and ${inactive.length - inactiveLines.length} more`);
-    const excusedLines = excused.slice(0, 20)
+    const excusedLines = excusedMembers
         .map((x) => `${reportUser(x.member)} — ${x.rank}`);
     if (excused.length > excusedLines.length) excusedLines.push(`…and ${excused.length - excusedLines.length} more`);
     const pageRow = new ActionRowBuilder().addComponents(
@@ -272,19 +277,24 @@ function reportPanel(tracked, page = 0) {
             .setStyle(ButtonStyle.Primary).setDisabled(page === departments.length - 1),
     );
 
-    return panel({
-        title: `📋 Corporate | ${department.name} Activity`,
-        intro: `**Week:** ${weekKey()} • **Department ${page + 1} of ${departments.length}**`,
-        sections: [
-            [`**${E.status} Weekly Status**`, `${E.green} **Active:** ${active.length}`, `${E.red} **Inactive:** ${inactive.length}`, `${E.yellow} **Excused:** ${excused.length}`],
-            ['**🏆 Top Activity**', ...(top.length ? top : ['No qualifying activity yet.'])],
-            ['**Member Activity**', `**Department:** ${department.name}`, ...(activityLines.length ? activityLines : ['No tracked members in this department.'])],
-            [`**${E.red} Inactive Members**`, ...(inactiveLines.length ? inactiveLines : ['No inactive members.'])],
-            [`**${E.yellow} Excused Members**`, ...(excusedLines.length ? excusedLines : ['No excused members.'])],
-        ],
-        footer: 'Requirements vary by rank. Use the buttons to switch departments.',
-        rows: [pageRow],
-    });
+    return {
+        container: panel({
+            title: `📋 Corporate | ${department.name} Activity`,
+            intro: `**Week:** ${weekKey()} • **Department ${page + 1} of ${departments.length}**`,
+            sections: [
+                [`**${E.status} Weekly Status**`, `${E.green} **Active:** ${active.length}`, `${E.red} **Inactive:** ${inactive.length}`, `${E.yellow} **Excused:** ${excused.length}`],
+                ['**🏆 Top Activity**', ...(top.length ? top : ['No qualifying activity yet.'])],
+                ['**Member Activity**', `**Department:** ${department.name}`, ...(activityLines.length ? activityLines : ['No tracked members in this department.'])],
+                [`**${E.red} Inactive Members**`, ...(inactiveLines.length ? inactiveLines : ['No inactive members.'])],
+                [`**${E.yellow} Excused Members**`, ...(excusedLines.length ? excusedLines : ['No excused members.'])],
+            ],
+            footer: 'Requirements vary by rank. Use the buttons to switch departments.',
+            rows: [pageRow],
+        }),
+        allowedMentions: reportMentions([
+            ...topMembers, ...activityMembers, ...inactiveMembers, ...excusedMembers,
+        ].map((x) => x.member.id)),
+    };
 }
 
 function attachReportPagination(message, tracked) {
@@ -299,10 +309,11 @@ function attachReportPagination(message, tracked) {
         try {
             currentPage = Math.max(0, Math.min(departments.length - 1,
                 currentPage + (button.customId === 'corp_report_next' ? 1 : -1)));
+            const report = reportPanel(tracked, currentPage);
             await button.update({
-                components: [reportPanel(tracked, currentPage)],
+                components: [report.container],
                 flags: MessageFlags.IsComponentsV2,
-                allowedMentions: NO_PINGS,
+                allowedMentions: report.allowedMentions,
             });
         } catch (err) {
             console.error('[corp-activity] Could not change report department page:', err);
@@ -312,10 +323,11 @@ function attachReportPagination(message, tracked) {
         }
     });
     collector.on('end', () => {
+        const report = reportPanel(tracked, currentPage);
         message.edit({
-            components: [reportPanel(tracked, currentPage)],
+            components: [report.container],
             flags: MessageFlags.IsComponentsV2,
-            allowedMentions: NO_PINGS,
+            allowedMentions: report.allowedMentions,
         }).catch((err) => console.error('[corp-activity] Could not disable expired report buttons:', err));
     });
 }
@@ -435,7 +447,8 @@ for (const [name, description] of [
     cmd(B(name, description), async (i) => {
         await defer(i);
         const { tracked } = await collect(i.guild);
-        await respond(i, reportPanel(tracked));
+        const report = reportPanel(tracked);
+        await respond(i, report.container, { allowedMentions: report.allowedMentions });
         attachReportPagination(await i.fetchReply(), tracked);
     }, { hrd: true });
 }
@@ -678,8 +691,10 @@ async function weeklyTick(client) {
         if (!channel?.isTextBased()) continue;
         try {
             const { tracked } = await collect(guild);
+            const reportData = reportPanel(tracked);
             const report = await channel.send({
-                components: [reportPanel(tracked)], flags: MessageFlags.IsComponentsV2, allowedMentions: NO_PINGS,
+                components: [reportData.container], flags: MessageFlags.IsComponentsV2,
+                allowedMentions: reportData.allowedMentions,
             });
             attachReportPagination(report, tracked);
         } catch (err) {

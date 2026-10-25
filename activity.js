@@ -46,10 +46,11 @@ const ST = {
 };
 const FIELDS = ['messages', 'shifts', 'cohosts', 'excused'];
 const mention = (id) => `<@${id}>`;
+const reportMentions = (userIds) => ({ parse: [], users: [...new Set(userIds)] });
 const reportUser = (member) => {
     const name = escapeMarkdown(member.displayName);
     const username = escapeMarkdown(member.user.username);
-    return name === username ? name : `${name} (@${username})`;
+    return `${mention(member.id)} — ${name === username ? name : `${name} (@${username})`}`;
 };
 
 // =====================================================================
@@ -184,14 +185,14 @@ function panel({ title, intro, sections = [], footer, rows = [] }) {
 }
 const simple = (msg) => new ContainerBuilder().addTextDisplayComponents(td(msg));
 
-function respond(i, container, { ephemeral = false } = {}) {
+function respond(i, container, { ephemeral = false, allowedMentions = NO_PINGS } = {}) {
     if (i.deferred || i.replied) {
-        return i.editReply({ components: [container], flags: MessageFlags.IsComponentsV2, allowedMentions: NO_PINGS });
+        return i.editReply({ components: [container], flags: MessageFlags.IsComponentsV2, allowedMentions });
     }
     return i.reply({
         components: [container],
         flags: MessageFlags.IsComponentsV2 | (ephemeral ? MessageFlags.Ephemeral : 0),
-        allowedMentions: NO_PINGS,
+        allowedMentions,
     });
 }
 const say = (i, msg, ephemeral = false) => respond(i, simple(msg), { ephemeral });
@@ -229,22 +230,27 @@ async function reportPanel(guild) {
     const by = (s) => tracked.filter((x) => x.status === s);
     const [active, inactive, excused] = [by(ST.ACTIVE), by(ST.INACTIVE), by(ST.EXCUSED)];
     const medals = ['🥇', '🥈', '🥉'];
-    const top = [...active].sort((a, b) => b.ratio - a.ratio).slice(0, 3)
+    const topMembers = [...active].sort((a, b) => b.ratio - a.ratio).slice(0, 3);
+    const inactiveMembers = inactive.slice(0, 15);
+    const top = topMembers
         .map((x, i) => `${medals[i]} ${reportUser(x.member)} — **${(x.ratio * 100).toFixed(0)}%**`);
-    const lines = inactive.slice(0, 15)
+    const lines = inactiveMembers
         .map((x) => `${reportUser(x.member)} — ${x.rank} — ${activityText(x.rank, x.req, x.row)}`);
     if (inactive.length > 15) lines.push(`…and ${inactive.length - 15} more`);
 
-    return panel({
-        title: '📋 HRD | Weekly Management Activity',
-        intro: `**Week:** ${weekKey()}`,
-        sections: [
-            [`**${E.status} Weekly Status**`, `${E.green} **Active:** ${active.length}`, `${E.red} **Inactive:** ${inactive.length}`, `${E.yellow} **Excused:** ${excused.length}`],
-            ['**🏆 Top Management**', ...(top.length ? top : ['No qualifying activity yet.'])],
-            [`**${E.red} Inactive Members**`, ...(lines.length ? lines : ['Everyone has met a requirement! 🎉'])],
-        ],
-        footer: 'Management must complete ONE requirement each week. Interns are exempt.',
-    });
+    return {
+        container: panel({
+            title: '📋 HRD | Weekly Management Activity',
+            intro: `**Week:** ${weekKey()}`,
+            sections: [
+                [`**${E.status} Weekly Status**`, `${E.green} **Active:** ${active.length}`, `${E.red} **Inactive:** ${inactive.length}`, `${E.yellow} **Excused:** ${excused.length}`],
+                ['**🏆 Top Management**', ...(top.length ? top : ['No qualifying activity yet.'])],
+                [`**${E.red} Inactive Members**`, ...(lines.length ? lines : ['Everyone has met a requirement! 🎉'])],
+            ],
+            footer: 'Management must complete ONE requirement each week. Interns are exempt.',
+        }),
+        allowedMentions: reportMentions([...topMembers, ...inactiveMembers].map((x) => x.member.id)),
+    };
 }
 
 async function showHistory(i, member) {
@@ -352,7 +358,11 @@ for (const [name, description] of [
     ['report', 'Generate a full weekly HRD management activity report.'],
     ['closeweek', 'Generate the current weekly report without ending the week.'],
 ]) {
-    cmd(B(name, description), async (i) => { await defer(i); return respond(i, await reportPanel(i.guild)); }, { hrd: true });
+    cmd(B(name, description), async (i) => {
+        await defer(i);
+        const report = await reportPanel(i.guild);
+        return respond(i, report.container, { allowedMentions: report.allowedMentions });
+    }, { hrd: true });
 }
 
 cmd(B('checkall', 'Check all tracked management members.'), async (i) => {
@@ -667,8 +677,9 @@ async function weeklyTick(client) {
         const channel = guild.channels.cache.get(channelId);
         if (!channel?.isTextBased()) continue;
         try {
+            const report = await reportPanel(guild);
             await channel.send({
-                components: [await reportPanel(guild)], flags: MessageFlags.IsComponentsV2, allowedMentions: NO_PINGS,
+                components: [report.container], flags: MessageFlags.IsComponentsV2, allowedMentions: report.allowedMentions,
             });
         } catch (err) {
             console.error(`[activity] Could not send weekly report in ${channelId}:`, err.message);
