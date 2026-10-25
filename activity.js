@@ -47,11 +47,7 @@ const ST = {
 const FIELDS = ['messages', 'shifts', 'cohosts', 'excused'];
 const mention = (id) => `<@${id}>`;
 const reportMentions = (userIds) => ({ parse: [], users: [...new Set(userIds)] });
-const reportUser = (member) => {
-    const name = escapeMarkdown(member.displayName);
-    const username = escapeMarkdown(member.user.username);
-    return `${mention(member.id)} — ${name === username ? name : `${name} (@${username})`}`;
-};
+const reportUser = (member) => mention(member.id);
 
 // =====================================================================
 // STORE (MongoDB)
