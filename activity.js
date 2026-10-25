@@ -46,6 +46,11 @@ const ST = {
 };
 const FIELDS = ['messages', 'shifts', 'cohosts', 'excused'];
 const mention = (id) => `<@${id}>`;
+const reportUser = (member) => {
+    const name = escapeMarkdown(member.displayName);
+    const username = escapeMarkdown(member.user.username);
+    return name === username ? name : `${name} (@${username})`;
+};
 
 // =====================================================================
 // STORE (MongoDB)
@@ -225,9 +230,9 @@ async function reportPanel(guild) {
     const [active, inactive, excused] = [by(ST.ACTIVE), by(ST.INACTIVE), by(ST.EXCUSED)];
     const medals = ['🥇', '🥈', '🥉'];
     const top = [...active].sort((a, b) => b.ratio - a.ratio).slice(0, 3)
-        .map((x, i) => `${medals[i]} ${mention(x.member.id)} — **${(x.ratio * 100).toFixed(0)}%**`);
+        .map((x, i) => `${medals[i]} ${reportUser(x.member)} — **${(x.ratio * 100).toFixed(0)}%**`);
     const lines = inactive.slice(0, 15)
-        .map((x) => `${mention(x.member.id)} — ${x.rank} — ${activityText(x.rank, x.req, x.row)}`);
+        .map((x) => `${reportUser(x.member)} — ${x.rank} — ${activityText(x.rank, x.req, x.row)}`);
     if (inactive.length > 15) lines.push(`…and ${inactive.length - 15} more`);
 
     return panel({

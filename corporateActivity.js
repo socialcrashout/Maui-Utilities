@@ -72,6 +72,11 @@ const ST = {
 };
 const FIELDS = ['messages', 'shifts', 'excused'];
 const mention = (id) => `<@${id}>`;
+const reportUser = (member) => {
+    const name = escapeMarkdown(member.displayName);
+    const username = escapeMarkdown(member.user.username);
+    return name === username ? name : `${name} (@${username})`;
+};
 
 // =====================================================================
 // STORE (MongoDB)
@@ -248,15 +253,15 @@ function reportPanel(tracked, page = 0) {
     const [active, inactive, excused] = [by(ST.ACTIVE), by(ST.INACTIVE), by(ST.EXCUSED)];
     const medals = ['🥇', '🥈', '🥉'];
     const top = [...active].sort((a, b) => b.ratio - a.ratio).slice(0, 3)
-        .map((x, i) => `${medals[i]} ${mention(x.member.id)} — **${(x.ratio * 100).toFixed(0)}%**`);
+        .map((x, i) => `${medals[i]} ${reportUser(x.member)} — **${(x.ratio * 100).toFixed(0)}%**`);
     const activityLines = [...members].sort((a, b) => a.rank.localeCompare(b.rank)).slice(0, 25)
-        .map((x) => `${mention(x.member.id)} — ${x.rank} • ${x.status} — ${activityText(x.req, x.row)}`);
+        .map((x) => `${reportUser(x.member)} — ${x.rank} • ${x.status} — ${activityText(x.req, x.row)}`);
     if (members.length > activityLines.length) activityLines.push(`…and ${members.length - activityLines.length} more`);
     const inactiveLines = inactive.slice(0, 20)
-        .map((x) => `${mention(x.member.id)} — ${x.rank} — ${activityText(x.req, x.row)}`);
+        .map((x) => `${reportUser(x.member)} — ${x.rank} — ${activityText(x.req, x.row)}`);
     if (inactive.length > inactiveLines.length) inactiveLines.push(`…and ${inactive.length - inactiveLines.length} more`);
     const excusedLines = excused.slice(0, 20)
-        .map((x) => `${mention(x.member.id)} — ${x.rank}`);
+        .map((x) => `${reportUser(x.member)} — ${x.rank}`);
     if (excused.length > excusedLines.length) excusedLines.push(`…and ${excused.length - excusedLines.length} more`);
     const pageRow = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId('corp_report_previous').setLabel('Previous')
